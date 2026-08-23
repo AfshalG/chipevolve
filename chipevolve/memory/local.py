@@ -8,7 +8,13 @@ class EngineeringMemory:
     def __init__(self, repository: Repository) -> None:
         self.repository = repository
 
-    def recall(self, mutation_type: str, limit: int = 3) -> list[MemoryReference]:
+    def recall(self, mutation_type: str | None = None, limit: int = 5) -> list[MemoryReference]:
+        """Recent experiments, newest first.
+
+        mutation_type defaults to None (all types) because recall happens
+        BEFORE the mutation is planned — filtering by a type Codex has not
+        chosen yet is circular, and leaves memory permanently empty.
+        """
         return [
             MemoryReference(
                 generation_id=f"gen-{item.generation:03d}",

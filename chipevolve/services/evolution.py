@@ -108,8 +108,8 @@ class EvolutionService:
         self.repository.save_generation(generation)
         await self._stage(generation, GenerationStage.ANALYZING, "Analyzing ALU operation decode")
 
-        await self._stage(generation, GenerationStage.RECALLING_MEMORY, "Searching engineering memory for related mux transformations")
-        recalls = self.memory.recall("mux_restructure")
+        await self._stage(generation, GenerationStage.RECALLING_MEMORY, "Searching engineering memory for prior experiments")
+        recalls = self.memory.recall(limit=5)
         generation.memory_refs = recalls
         await self._emit("generation.memory", number, message=f"Recalled {len(recalls)} related experiments", memories=[item.model_dump() for item in recalls])
 
@@ -208,11 +208,10 @@ class EvolutionService:
                 candidate=candidate,
                 verification=verification,
                 decision=generation.status.value,
-                lesson=(
-                    f"Mux restructure changed measured fitness by {fitness.improvement_percent:.2f}%."
-                    if fitness.improvement_percent is not None
-                    else f"Mux restructure was {generation.status.value}: {fitness.reason}"
-                ),
+                # The lesson is fed back into Codex's prompt next generation, so
+                # it must name the actual transformation and carry the measured
+                # deltas — not a hardcoded label.
+                lesson=_lesson(plan, generation, candidate, fitness),
             )
         )
         generation.updated_at = datetime.now(UTC)
@@ -220,3 +219,19 @@ class EvolutionService:
         await self._emit("generation.decision", number, stage=generation.stage, message=generation.decision_reason, decision=generation.status.value, generation_data=generation.model_dump(mode="json"))
         return generation
 
+
+
+def _lesson(plan, generation, candidate, fitness) -> str:
+    """One sentence describing what was tried and what it measured."""
+    label = plan.mutation_type.replace("_", " ")
+    before = generation.metrics_before
+    parts: list[str] = []
+    if before and candidate:
+        if before.cell_count and candidate.cell_count:
+            delta = (candidate.cell_count - before.cell_count) / before.cell_count * 100.0
+            parts.append(f"cells {before.cell_count}->{candidate.cell_count} ({delta:+.1f}%)")
+        if before.logic_depth and candidate.logic_depth:
+            delta = (candidate.logic_depth - before.logic_depth) / before.logic_depth * 100.0
+            parts.append(f"depth {before.logic_depth}->{candidate.logic_depth} ({delta:+.1f}%)")
+    measured = "; ".join(parts) if parts else fitness.reason
+    return f"{label} on {plan.target_module} was {generation.status.value}: {measured}."

@@ -12,7 +12,21 @@ OBJECTIVES: dict[str, ObjectiveWeights] = {
 
 
 def _delay(metrics: Metrics) -> float | None:
-    return 1000.0 / metrics.fmax_mhz if metrics.fmax_mhz and metrics.fmax_mhz > 0 else None
+    """Delay term for the fitness function.
+
+    Prefers real fmax when OpenROAD supplied it. Otherwise falls back to
+    Yosys logic depth, which is proportional to combinational delay — and
+    since fitness compares RATIOS against baseline, the units cancel.
+
+    Without this fallback the delay term drops out entirely and fitness
+    collapses to cell count alone, which would make the priority-mux
+    restructure (a depth win) score as barely an improvement.
+    """
+    if metrics.fmax_mhz and metrics.fmax_mhz > 0:
+        return 1000.0 / metrics.fmax_mhz
+    if metrics.logic_depth and metrics.logic_depth > 0:
+        return float(metrics.logic_depth)
+    return None
 
 
 def calculate_fitness(

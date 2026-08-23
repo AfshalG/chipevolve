@@ -48,6 +48,10 @@ class Metrics(BaseModel):
     power_mw: float | None = None
     area_um2: float | None = None
     cell_count: int | None = None
+    register_count: int | None = None
+    # Longest topological path from Yosys `ltp`. A PROXY for delay, not timing.
+    # Used as the delay term whenever no real fmax is available.
+    logic_depth: int | None = None
     worst_slack_ns: float | None = None
     total_negative_slack_ns: float | None = None
     fmax_mhz: float | None = None

@@ -167,6 +167,11 @@ class ProjectConfig(BaseModel):
     clock_period_ns: float = 10.0
     objective: Literal["balanced", "performance", "low_power", "compact"] = "balanced"
     max_generations: int = Field(default=5, ge=1, le=50)
+    # Wall-clock ceilings per EDA stage. Simulation is the slow one: Verilator's
+    # --binary flow compiles C++ before it runs a single vector.
+    lint_timeout_s: float = Field(default=60.0, gt=0)
+    simulation_timeout_s: float = Field(default=300.0, gt=0)
+    synthesis_timeout_s: float = Field(default=180.0, gt=0)
     protected: list[str] = Field(default_factory=lambda: ["tb/**", "constraints/**", "scripts/evaluation/**", "golden/**"])
 
 

@@ -136,11 +136,15 @@ async def _list_files(ctx: ToolContext, _: dict) -> ToolOutcome:
     keep = {".sv", ".v", ".svh", ".vh", ".sdc", ".yaml", ".yml", ".tcl"}
     rows: list[str] = []
     for path in sorted(ctx.workspace.rglob("*")):
-        if not path.is_file() or ".chipevolve" in path.parts or ".git" in path.parts:
+        if not path.is_file() or path.suffix not in keep:
             continue
-        if path.suffix not in keep:
+        # Compare against the path *relative to the workspace*: in optimize mode the
+        # workspace itself lives under .chipevolve/generations/, so testing the
+        # absolute parts would filter out every file in the project.
+        relative_path = path.relative_to(ctx.workspace)
+        if ".chipevolve" in relative_path.parts or ".git" in relative_path.parts:
             continue
-        relative = path.relative_to(ctx.workspace).as_posix()
+        relative = relative_path.as_posix()
         if ctx.is_protected(relative):
             role = "protected"
         elif relative in ctx.project.rtl:

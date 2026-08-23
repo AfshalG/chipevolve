@@ -313,14 +313,18 @@ def _supports_output_config(client) -> bool:
     return _stream_accepts(type(client.messages), "output_config")
 
 
+try:  # Imported at startup: doing it lazily cost ~8s of event-loop stall on the
+    import anthropic  # first task, which pushed the client's request past its timeout.
+except ImportError:  # pragma: no cover - exercised only in envs without the SDK
+    anthropic = None
+
+
 def _client():
-    try:
-        import anthropic
-    except ImportError as error:
+    if anthropic is None:
         raise AgentUnavailable(
             "The anthropic package is not installed in the backend environment. "
             "Run: pip install 'anthropic>=0.70'"
-        ) from error
+        )
     if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
         raise AgentUnavailable(
             "No Anthropic credentials found. Set ANTHROPIC_API_KEY in the environment "

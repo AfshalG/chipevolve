@@ -16,6 +16,7 @@ from chipevolve.domain.models import (
 from chipevolve.eda.providers import Toolchain
 from chipevolve.memory.local import EngineeringMemory
 from chipevolve.scoring.fitness import calculate_fitness
+from chipevolve.services.config import iter_source_files
 from chipevolve.storage.repository import Repository
 
 
@@ -133,18 +134,12 @@ def _read_log(path: str | None) -> str:
 
 
 async def _list_files(ctx: ToolContext, _: dict) -> ToolOutcome:
-    keep = {".sv", ".v", ".svh", ".vh", ".sdc", ".yaml", ".yml", ".tcl"}
+    keep = (".sv", ".v", ".svh", ".vh", ".sdc", ".yaml", ".yml", ".tcl")
     rows: list[str] = []
-    for path in sorted(ctx.workspace.rglob("*")):
-        if not path.is_file() or path.suffix not in keep:
-            continue
-        # Compare against the path *relative to the workspace*: in optimize mode the
-        # workspace itself lives under .chipevolve/generations/, so testing the
-        # absolute parts would filter out every file in the project.
-        relative_path = path.relative_to(ctx.workspace)
-        if ".chipevolve" in relative_path.parts or ".git" in relative_path.parts:
-            continue
-        relative = relative_path.as_posix()
+    # iter_source_files prunes vendor and build trees, so a workspace that also
+    # holds node_modules or a virtualenv does not stall the agent's first call.
+    for relative in iter_source_files(ctx.workspace, keep):
+        path = ctx.workspace / relative
         if ctx.is_protected(relative):
             role = "protected"
         elif relative in ctx.project.rtl:

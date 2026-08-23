@@ -4,6 +4,7 @@ project:
 
 rtl:
   - rtl/alu.sv
+  - rtl/mul8_pipe4.sv
 
 testbench:
   command:

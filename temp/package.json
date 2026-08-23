@@ -2,7 +2,7 @@
   "name": "chipevolve",
   "displayName": "ChipEvolve",
   "description": "Your chip gets better every generation.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "chipevolve",
   "license": "MIT",
   "engines": {
@@ -22,6 +22,7 @@
     "EDA"
   ],
   "activationEvents": [
+    "onView:chipevolve.chat",
     "onLanguage:systemverilog",
     "onLanguage:verilog",
     "onStartupFinished"
@@ -34,6 +35,11 @@
   },
   "contributes": {
     "commands": [
+      {
+        "command": "chipevolve.newTask",
+        "title": "ChipEvolve: New Task",
+        "icon": "$(add)"
+      },
       {
         "command": "chipevolve.generateRtl",
         "title": "ChipEvolve: Generate RTL",
@@ -119,6 +125,28 @@
           "when": "resourceExtname == .sv || resourceExtname == .v || resourceExtname == .svh",
           "group": "chipevolve@1"
         }
+      ],
+      "view/title": [
+        {
+          "command": "chipevolve.newTask",
+          "when": "view == chipevolve.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "chipevolve.openDashboard",
+          "when": "view == chipevolve.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "chipevolve.showLog",
+          "when": "view == chipevolve.chat",
+          "group": "overflow@1"
+        },
+        {
+          "command": "chipevolve.establishBaseline",
+          "when": "view == chipevolve.chat",
+          "group": "overflow@2"
+        }
       ]
     },
     "configuration": {
@@ -171,6 +199,24 @@
           "markdownDescription": "Tool classes to run without asking. `edit` is withheld by default so file changes are always confirmed."
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "chipevolve",
+          "title": "ChipEvolve",
+          "icon": "apps/extension/media/chip.svg"
+        }
+      ]
+    },
+    "views": {
+      "chipevolve": [
+        {
+          "type": "webview",
+          "id": "chipevolve.chat",
+          "name": "Chat"
+        }
+      ]
     }
   },
   "repository": {

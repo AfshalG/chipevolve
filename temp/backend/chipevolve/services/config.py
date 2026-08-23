@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 from pathlib import Path
 
@@ -9,6 +10,46 @@ from chipevolve.domain.models import ProjectConfig
 
 
 RTL_SUFFIXES = (".sv", ".v")
+
+# Directories that never contain project RTL but can contain hundreds of
+# thousands of files. Walking into them turns project discovery into a
+# multi-minute scan, and a Linux venv on a Windows share can even raise
+# WinError 1920 on its dangling lib64 symlink.
+PRUNED_DIRS = frozenset(
+    {
+        ".chipevolve", ".git", ".hg", ".svn", ".venv", "venv", "env",
+        "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache",
+        "obj_dir", "dist", "build", "target", "out", ".tox", ".idea", ".vscode",
+        "site-packages",
+    }
+)
+
+MAX_SCANNED_FILES = 20000
+
+
+def iter_source_files(root: Path, suffixes: tuple[str, ...] | frozenset[str] = RTL_SUFFIXES) -> list[str]:
+    """
+    Project-relative source paths under `root`, pruning vendor and build trees.
+
+    Uses os.walk so directories can be pruned in place rather than discovered
+    and then filtered, and tolerates entries the OS refuses to stat.
+    """
+    found: list[str] = []
+    scanned = 0
+    for current, dirnames, filenames in os.walk(root, onerror=lambda _: None, followlinks=False):
+        dirnames[:] = [name for name in dirnames if name not in PRUNED_DIRS and not name.startswith(".")]
+        for name in filenames:
+            scanned += 1
+            if scanned > MAX_SCANNED_FILES:
+                return sorted(found)
+            if not name.lower().endswith(tuple(suffixes)):
+                continue
+            try:
+                relative = (Path(current) / name).relative_to(root)
+            except ValueError:
+                continue
+            found.append(relative.as_posix())
+    return sorted(found)
 
 
 def discover_config(root: Path) -> ProjectConfig:
@@ -21,14 +62,7 @@ def discover_config(root: Path) -> ProjectConfig:
     folder already has something that looks like a testbench.
     """
     root = root.resolve()
-    sources = sorted(
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file()
-        and path.suffix in RTL_SUFFIXES
-        and ".chipevolve" not in path.relative_to(root).parts
-        and "obj_dir" not in path.relative_to(root).parts
-    )
+    sources = iter_source_files(root)
     design = [item for item in sources if not _looks_like_testbench(item)]
     top = Path(design[0]).stem if design else root.name.replace("-", "_")
     return ProjectConfig(

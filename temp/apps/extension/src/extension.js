@@ -16,6 +16,7 @@ let stream;
 let output;
 let statusItem;
 let diagnostics;
+let chatView;
 
 /** Everything about the task currently in flight. */
 let task = null;
@@ -65,9 +66,39 @@ function resolveProjectRoot(context) {
 
   if (folders.length) {
     const withProject = folders.find((folder) => fs.existsSync(path.join(folder.uri.fsPath, "project.yaml")));
-    return (withProject || folders[0]).uri.fsPath;
+    if (withProject) return withProject.uri.fsPath;
+    // A repo often keeps its RTL in a subdirectory. Prefer the nearest
+    // project.yaml below the root over scattering generated files at the top.
+    const nested = findProjectBelow(folders[0].uri.fsPath, 3);
+    if (nested) return nested;
+    return folders[0].uri.fsPath;
   }
   return path.join(context.extensionPath, configured || "examples/alu");
+}
+
+const PRUNED_DIRS = new Set([
+  "node_modules", ".git", ".venv", "venv", "env", "__pycache__", "dist", "build",
+  "target", "out", "obj_dir", ".chipevolve", ".vscode", ".idea", "site-packages",
+]);
+
+/** Shallow breadth-first hunt for a project.yaml, skipping vendor trees. */
+function findProjectBelow(root, maxDepth) {
+  let level = [root];
+  for (let depth = 0; depth < maxDepth && level.length; depth += 1) {
+    const next = [];
+    for (const dir of level) {
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || PRUNED_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        const child = path.join(dir, entry.name);
+        if (fs.existsSync(path.join(child, "project.yaml"))) return child;
+        next.push(child);
+      }
+    }
+    level = next;
+  }
+  return null;
 }
 
 /** The root the backend is currently pointed at. */
@@ -330,6 +361,14 @@ async function askApproval(context, payload) {
 
 async function onEvent(context, event) {
   const payload = event.payload || {};
+  // The backend broadcasts one bus to every listener, so a second VS Code window
+  // (or a CLI client) would otherwise stream its transcript into this one.
+  // Once we know our own session id, ignore everybody else's chat events.
+  if (payload.session && task && task.sessionId && payload.session !== task.sessionId) return;
+  // The sidebar is the primary surface; it renders the transcript, the tool
+  // cards and the approval buttons. Everything below is the native half:
+  // the log, the status bar, Problems, and the diff editor.
+  chatView?.webview.postMessage({ type: "event", event });
   if (task && event.seq) {
     if (task.seen.has(event.seq)) return;
     task.seen.add(event.seq);
@@ -356,6 +395,10 @@ async function onEvent(context, event) {
 
     case "chat.approval_required": {
       setStatus("waiting for approval");
+      // The sidebar shows Approve/Reject inline, so only fall back to a modal
+      // notification when the view is not open.
+      if (payload.preview && payload.preview.path) previews.set(payload.preview.path, payload.preview);
+      if (chatView) break;
       const approved = await askApproval(context, payload);
       try {
         await requestJson("POST", `${configuration().backendUrl}/api/agent/approve`, {
@@ -442,6 +485,10 @@ async function finishTask(context, payload) {
   }
 
   const edited = payload.edited || [];
+  if (payload.detached && edited.length && chatView) {
+    // The sidebar renders its own "Keep this candidate?" card.
+    return;
+  }
   if (payload.detached && edited.length) {
     const verdict = finished.verdict;
     const headline = verdict
@@ -503,13 +550,15 @@ async function applyEdits(context) {
     const applied = result.applied || [];
     if (!applied.length) {
       vscode.window.showInformationMessage("ChipEvolve had no edits to apply.");
-      return;
+      return [];
     }
     vscode.window.showInformationMessage(`ChipEvolve applied ${applied.join(", ")}`);
     await openFile(context, applied[0]);
+    return applied;
   } catch (error) {
     vscode.window.showErrorMessage(`ChipEvolve could not apply the edits: ${error.message}`);
   }
+  return [];
 }
 
 // --------------------------------------------------------------- event stream
@@ -563,6 +612,12 @@ function attachEventStream(context) {
 // ------------------------------------------------------------------- commands
 
 async function runMode(context, mode) {
+  if (chatView) {
+    await vscode.commands.executeCommand("chipevolve.chat.focus");
+    chatView.webview.postMessage({ type: "setMode", mode });
+    await pushStatus(context);
+    return;
+  }
   if (task) {
     const action = await vscode.window.showWarningMessage(
       "A ChipEvolve task is already running.", "Cancel it", "Keep waiting");
@@ -620,21 +675,28 @@ async function runMode(context, mode) {
           findings: 0,
           verdict: null,
           workspacePath: null,
+          sessionId: null,
           detached: false,
           touched: new Set(),
         };
         token.onCancellationRequested(() => cancelTask());
         setStatus(`${MODE_LABEL[mode].toLowerCase()}…`, true);
         try {
-          await requestJson("POST", `${configuration().backendUrl}/api/agent/task`, {
-            mode,
-            message,
-            model: configuration().model,
-            auto_approve: configuration().autoApprove,
-            focus_path: view.focus,
-            open_files: view.open,
-            selection: view.selection,
-          });
+          const started = await requestJson(
+            "POST",
+            `${configuration().backendUrl}/api/agent/task`,
+            {
+              mode,
+              message,
+              model: configuration().model,
+              auto_approve: configuration().autoApprove,
+              focus_path: view.focus,
+              open_files: view.open,
+              selection: view.selection,
+            },
+            60000,
+          );
+          if (task) task.sessionId = started.session;
         } catch (error) {
           task = null;
           setStatus("idle");
@@ -649,6 +711,170 @@ async function cancelTask() {
   try {
     await requestJson("POST", `${configuration().backendUrl}/api/agent/cancel`);
   } catch { /* the task may already have finished */ }
+}
+
+// ------------------------------------------------------------ chat sidebar
+
+function chatHtml(webview, context) {
+  const media = vscode.Uri.joinPath(context.extensionUri, "apps", "extension", "media");
+  const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.css"));
+  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.js"));
+  const nonce = Math.random().toString(36).slice(2);
+  return `<!doctype html>
+  <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+  <link rel="stylesheet" href="${styleUri}"><title>ChipEvolve</title></head>
+  <body><div id="app"></div><script nonce="${nonce}" src="${scriptUri}"></script></body></html>`;
+}
+
+/** Tell the sidebar whether the backend is reachable and what file is focused. */
+async function pushStatus(context) {
+  if (!chatView) return;
+  const view = editorContext(context);
+  try {
+    const health = await requestJson("GET", `${configuration().backendUrl}/api/health`, undefined, 3000);
+    chatView.webview.postMessage({
+      type: "status",
+      online: true,
+      project: health.project,
+      focus: view.focus,
+    });
+  } catch (error) {
+    chatView.webview.postMessage({
+      type: "status",
+      online: false,
+      reason: "Backend offline",
+      focus: view.focus,
+    });
+  }
+}
+
+class ChatViewProvider {
+  constructor(context) { this.context = context; }
+
+  resolveWebviewView(view) {
+    chatView = view;
+    view.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.file(path.join(this.context.extensionPath, "apps", "extension", "media"))],
+    };
+    view.webview.html = chatHtml(view.webview, this.context);
+    view.webview.onDidReceiveMessage((message) => onChatMessage(this.context, message));
+    view.onDidDispose(() => { chatView = undefined; });
+  }
+}
+
+async function onChatMessage(context, message) {
+  const base = configuration().backendUrl;
+  switch (message.command) {
+    case "ready":
+      await pushStatus(context);
+      return;
+
+    case "startBackend":
+      await startBackend(context);
+      await pushStatus(context);
+      return;
+
+    case "openFile":
+      await openFile(context, message.path, message.line || 0);
+      return;
+
+    case "openDiff":
+      if (task && task.detached) await openCandidateDiff(context, task.workspacePath, message.path);
+      else await showPendingDiff(context, pendingPreview(message.path));
+      return;
+
+    case "approve":
+      try {
+        await requestJson("POST", `${base}/api/agent/approve`, {
+          tool_use_id: message.toolUseId,
+          approved: Boolean(message.approved),
+        });
+      } catch (error) {
+        chatView?.webview.postMessage({ type: "taskFailed", message: error.message });
+      }
+      return;
+
+    case "cancel":
+      await cancelTask();
+      return;
+
+    case "applyEdits": {
+      const applied = await applyEdits(context);
+      chatView?.webview.postMessage({ type: "applied", files: applied });
+      return;
+    }
+
+    case "startTask":
+      await startTaskFromSidebar(context, message);
+      return;
+
+    default:
+      return;
+  }
+}
+
+/** Remember the last edit preview per path so "Open diff" can rebuild it. */
+const previews = new Map();
+function pendingPreview(relative) {
+  return previews.get(relative);
+}
+
+async function startTaskFromSidebar(context, message) {
+  if (!(await startBackend(context))) {
+    chatView?.webview.postMessage({ type: "taskFailed", message: "The backend is not running." });
+    return;
+  }
+  try {
+    await ensureProject(context);
+  } catch (error) {
+    chatView?.webview.postMessage({ type: "taskFailed", message: error.message });
+    return;
+  }
+
+  const view = editorContext(context);
+  diagnostics.clear();
+  previews.clear();
+  output.clear();
+
+  task = {
+    mode: message.mode,
+    seen: new Set(),
+    progress: null,
+    resolve: null,
+    usage: null,
+    findings: 0,
+    verdict: null,
+    workspacePath: null,
+    sessionId: null,
+    detached: false,
+    touched: new Set(),
+  };
+  setStatus(`${MODE_LABEL[message.mode].toLowerCase()}…`, true);
+
+  try {
+    const started = await requestJson(
+      "POST",
+      `${configuration().backendUrl}/api/agent/task`,
+      {
+        mode: message.mode,
+        message: message.message,
+        model: configuration().model,
+        auto_approve: message.autoApprove || [],
+        focus_path: view.focus,
+        open_files: view.open,
+        selection: view.selection,
+      },
+      60000,
+    );
+    if (task) task.sessionId = started.session;
+    await pushStatus(context);
+  } catch (error) {
+    task = null;
+    setStatus("idle");
+    chatView?.webview.postMessage({ type: "taskFailed", message: error.message });
+  }
 }
 
 // ------------------------------------------------------------------ dashboard
@@ -708,6 +934,15 @@ async function activate(context) {
   setStatus("idle");
   context.subscriptions.push(output, diagnostics, statusItem);
 
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider("chipevolve.chat", new ChatViewProvider(context), {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+  );
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => pushStatus(context).catch(() => {})),
+  );
+
   stream = attachEventStream(context);
   context.subscriptions.push({ dispose: () => stream?.destroy() });
 
@@ -720,6 +955,10 @@ async function activate(context) {
   register("chipevolve.cancelTask", () => cancelTask());
   register("chipevolve.applyEdits", () => applyEdits(context));
   register("chipevolve.showLog", () => output.show(true));
+  register("chipevolve.newTask", async () => {
+    await vscode.commands.executeCommand("chipevolve.chat.focus");
+    chatView?.webview.postMessage({ type: "newTask" });
+  });
   register("chipevolve.clearFindings", () => diagnostics.clear());
   register("chipevolve.openDashboard", () => openDashboard(context));
   register("chipevolve.startBackend", () => startBackend(context));

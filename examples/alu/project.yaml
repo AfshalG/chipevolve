@@ -1,0 +1,32 @@
+project:
+  name: demo-alu
+  top: alu
+
+rtl:
+  - rtl/alu.sv
+
+testbench:
+  command: verilator --binary --timing -Wno-fatal tb/alu_tb.sv rtl/alu.sv --top-module alu_tb -o alu_tb
+  binary: obj_dir/alu_tb
+  # Lane B parses this line from stdout:
+  #   TESTS: <passed>/<total> PASSED
+
+synthesis:
+  script: ../../scripts/synth.ys
+
+clock:
+  name: clk
+  period_ns: 10
+
+optimization:
+  objective: balanced
+  max_generations: 8
+
+# Enforced by src/engine/protect.ts — mutable is what Codex may touch.
+mutable:
+  - rtl/**
+
+protected:
+  - tb/**
+  - constraints/**
+  - scripts/**

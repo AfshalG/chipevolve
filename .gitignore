@@ -14,3 +14,7 @@ obj_dir/
 .DS_Store
 .env
 .env.*
+
+# never commit build/agent artifacts
+*.vsix
+.codex-plan.json

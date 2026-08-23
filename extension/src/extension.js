@@ -88,18 +88,35 @@ async function backendReady() {
 function resolveBackend(context) {
   const configured = configuration().backendPath;
   if (configured) return path.resolve(configured);
-  const repoRoot = path.resolve(context.extensionPath, "..");
-  if (fs.existsSync(path.join(repoRoot, "chipevolve", "api", "main.py"))) return repoRoot;
-  return path.join(context.extensionPath, "backend");
+  // Handles both layouts: running from source (package.json at the repo root,
+  // so extensionPath IS the repo root) and an installed .vsix that bundles the
+  // backend beside it.
+  // Prefer the open workspace: when the repo is open, use its live code and
+  // its .venv rather than the snapshot bundled inside the .vsix.
+  const workspaces = (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
+  const candidates = [
+    ...workspaces,
+    context.extensionPath,
+    path.resolve(context.extensionPath, ".."),
+    path.join(context.extensionPath, "backend"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(path.join(candidate, "chipevolve", "api", "main.py"))) return candidate;
+  }
+  return context.extensionPath;
 }
 
 function resolvePython(backendDir) {
   const configured = configuration().pythonPath;
   if (configured) return configured;
-  const candidate = process.platform === "win32"
-    ? path.join(backendDir, ".venv", "Scripts", "python.exe")
-    : path.join(backendDir, ".venv", "bin", "python");
-  if (fs.existsSync(candidate)) return candidate;
+  const relative = process.platform === "win32"
+    ? path.join(".venv", "Scripts", "python.exe")
+    : path.join(".venv", "bin", "python");
+  const roots = [backendDir, ...(vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath)];
+  for (const root of roots) {
+    const candidate = path.join(root, relative);
+    if (fs.existsSync(candidate)) return candidate;
+  }
   return process.platform === "win32" ? "python" : "python3";
 }
 

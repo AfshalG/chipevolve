@@ -59,7 +59,7 @@
       },
       {
         "command": "chipevolve.startBackend",
-        "title": "ChipEvolve: Start WSL Backend"
+        "title": "ChipEvolve: Start Backend"
       },
       {
         "command": "chipevolve.establishBaseline",

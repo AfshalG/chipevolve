@@ -82,10 +82,27 @@ Open the Memory view.
 
 **2:35 — Results** (25s)
 
-Results screen up and leave it there.
+Results screen up and leave it there. Real numbers from the 2026-08-23 run:
 
-> Seven generations, four accepted, three rejected. Cells down 9.8%, logic depth
-> down 12.5%, testbench still fully passing, protected files unchanged.
+```
+5 GENERATIONS · 1 ACCEPTED · 4 REJECTED
+
+                BASELINE     BEST      CHANGE
+Cells           510          505       -1.0%
+Registers       9            9         --
+Logic depth     18           18        --
+Verification    PASS  (230/230)
+Protected files UNCHANGED
+```
+
+> Five generations. One accepted. Four rejected — one because it was correct but
+> changed nothing, one because it broke the RTL, two because memory had already
+> measured them. Every number here came out of Yosys and Verilator. None of it
+> is the model's opinion.
+
+**Do not oversell the 1%.** A judge who knows hardware will respect a real,
+measured 1% far more than a fabricated 15%. The pitch is the loop and the
+rejections, not the magnitude.
 
 ## Questions you will get
 

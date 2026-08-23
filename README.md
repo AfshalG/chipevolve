@@ -63,6 +63,9 @@ proxy, or absent.
 | Congestion | OpenROAD | Real when the ORFS stage runs, otherwise `N/A` |
 | Power | — | **Not measured.** Honest dynamic power needs switching activity we don't have. |
 
+Measured baseline on the demo ALU: `cellCount 510 · registerCount 9 ·
+logicDepth 18 · areaUm2 null · 230/230 tests`.
+
 Anything unavailable renders as `N/A`. That is a feature, not a gap.
 
 ---
@@ -122,11 +125,38 @@ loop.
 ## Quickstart
 
 ```bash
-npm install
-npm run compile
-# F5 in VS Code → Extension Development Host
-# Command palette → "ChipEvolve: Evolve"
+# 1. EDA toolchain
+brew install yosys verilator
+
+# 2. Engine (Python)
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+
+# 3. Codex must be authenticated — the mutation step depends on it
+codex login status
+
+# 4. Establish the baseline, then evolve
+.venv/bin/chipevolve analyze examples/alu
+.venv/bin/chipevolve evolve  examples/alu
 ```
+
+Expected baseline on the demo ALU: **510 cells · 9 registers · depth 18 ·
+230/230 tests**. If you get different numbers, see `docs/BASELINE.md` — you are
+probably not using `scripts/synth.ys`.
+
+`--offline` swaps Codex for a canned mutation. Demo fallback only; the UI shows
+which one ran.
+
+### VS Code extension
+
+```bash
+# from the repo root
+code .
+# F5 → Extension Development Host → "ChipEvolve: Evolve"
+```
+
+The extension spawns the Python backend itself (`.venv` on macOS/Linux, opt-in
+WSL on Windows via the `chipevolve.useWsl` setting).
 
 ---
 
@@ -136,11 +166,12 @@ The UI shows live availability. Nothing is faked when unavailable.
 
 | | |
 |---|---|
-| Yosys | required |
-| Verilator | required |
-| Codex | required — proposes every mutation |
-| Claude-Mem | optional — local JSON store is the fallback |
-| OpenROAD | optional — degrades to `N/A` |
+| Yosys | required — cell count, register count, logic depth |
+| Verilator | required — lint gate + 230-vector testbench |
+| Codex | required — proposes and applies every mutation (`codex exec`) |
+| Engineering memory | working — SQLite; recall, lessons, repeat blocking |
+| Claude-Mem | adapter slot, not yet wired — local store carries the feature |
+| OpenROAD | not integrated — slack/congestion/power render `N/A` |
 
 ---
 

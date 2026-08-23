@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pathlib
+
 import difflib
 import uuid
 from datetime import UTC, datetime
@@ -88,6 +90,21 @@ class EvolutionService:
         await self._emit("baseline.failed", message="Baseline unavailable; install or repair the required EDA tools")
         return None, verification
 
+    def _dead_ends(self) -> list[str]:
+        """Mutation types already measured as producing zero improvement.
+
+        Fed into the prompt so Codex stops re-proposing them — otherwise every
+        blocked repeat still costs a full three-minute Codex call.
+        """
+        names: list[str] = []
+        for item in self.repository.memories(None, limit=20):
+            if item.decision != "rejected" or item.baseline is None or item.candidate is None:
+                continue
+            if (item.baseline.cell_count == item.candidate.cell_count
+                    and item.baseline.logic_depth == item.candidate.logic_depth):
+                names.append(item.mutation_type)
+        return names
+
     async def evolve_once(self) -> Generation | None:
         baseline, baseline_verification = await self.establish_baseline()
         if baseline is None:
@@ -138,6 +155,7 @@ class EvolutionService:
                     metrics=generation.metrics_before,
                     recalls=recalls,
                     on_log=logs.append,
+                    dead_ends=self._dead_ends(),
                 )
                 for line in logs:
                     await self._emit("generation.log", number, message=line)
@@ -148,6 +166,22 @@ class EvolutionService:
             generation.status = GenerationStatus.FAILED
             generation.decision_reason = str(error)
             await self._stage(generation, GenerationStage.FAILED, str(error))
+            self.repository.save_generation(generation)
+            return generation
+
+        repeat_of = _already_tried(plan, self.repository.memories(plan.mutation_type, limit=8))
+        if repeat_of is not None:
+            # Memory did its job: don't spend three minutes re-measuring a
+            # transformation we already know goes nowhere.
+            generation.status = GenerationStatus.FAILED
+            generation.mutation_type = plan.mutation_type
+            generation.hypothesis = plan.hypothesis
+            generation.decision_reason = (
+                f"Repeat of gen-{repeat_of:03d}: {plan.mutation_type} was already measured and rejected. "
+                "Memory prevented re-running this experiment."
+            )
+            self.repository.bump_counter("repeats_avoided")
+            await self._stage(generation, GenerationStage.FAILED, generation.decision_reason)
             self.repository.save_generation(generation)
             return generation
 
@@ -165,6 +199,34 @@ class EvolutionService:
         integrity_ok = integrity_matches(protected_before, protected_hashes(workspace, self.project.protected))
         await self._stage(generation, GenerationStage.LINTING, "Running Verilator lint")
         lint = await self.toolchain.lint(self.project, workspace)
+
+        if not lint.success and not self.offline:
+            # Codex often lands a partially-applied edit (half an if/else chain
+            # converted to a case, leaving a dangling `end ... else`). Hand the
+            # tool error straight back. Exactly one attempt — invalid RTL is a
+            # real result, not something to retry until it passes.
+            await self._stage(generation, GenerationStage.EDITING, "Lint failed \u2014 Codex attempting one repair")
+            try:
+                logs: list[str] = []
+                await self.mutator.repair(
+                    workspace=workspace,
+                    project=self.project,
+                    plan=plan,
+                    error_output=_tool_output(lint),
+                    on_log=logs.append,
+                )
+                for line in logs:
+                    await self._emit("generation.log", number, message=line)
+                generation.repaired = True
+                modified = (workspace / rtl_relative).read_text(encoding="utf-8")
+                generation.diff = "".join(difflib.unified_diff(
+                    original.splitlines(True), modified.splitlines(True),
+                    fromfile=f"baseline/{rtl_relative}", tofile=f"gen-{number:03d}/{rtl_relative}"))
+                await self._stage(generation, GenerationStage.LINTING, "Re-running Verilator lint after repair")
+                lint = await self.toolchain.lint(self.project, workspace)
+            except CodexUnavailable as error:
+                await self._emit("generation.log", number, message=f"Repair failed: {error}")
+
         await self._stage(generation, GenerationStage.SIMULATING, "Running exhaustive demo ALU testbench")
         simulation = await self.toolchain.simulate(self.project, workspace) if lint.success else lint
         await self._stage(generation, GenerationStage.SYNTHESIZING, "Synthesizing candidate with Yosys")
@@ -235,3 +297,39 @@ def _lesson(plan, generation, candidate, fitness) -> str:
             parts.append(f"depth {before.logic_depth}->{candidate.logic_depth} ({delta:+.1f}%)")
     measured = "; ".join(parts) if parts else fitness.reason
     return f"{label} on {plan.target_module} was {generation.status.value}: {measured}."
+
+
+def _already_tried(plan, memories) -> int | None:
+    """Return the generation number of a prior identical dead-end, if any.
+
+    "Dead end" means: same mutation type, already rejected, and it produced no
+    measurable improvement. A mutation type that failed only on broken syntax is
+    NOT a dead end — it deserves another attempt.
+    """
+    for item in memories:
+        if item.mutation_type != plan.mutation_type or item.decision != "rejected":
+            continue
+        before, after = item.baseline, item.candidate
+        if before is None or after is None:
+            continue  # never got measured (e.g. syntax error) — fair to retry
+        if before.cell_count == after.cell_count and before.logic_depth == after.logic_depth:
+            return item.generation
+    return None
+
+
+def _tool_output(execution) -> str:
+    """Read a ToolExecution's captured stdout/stderr off disk.
+
+    ToolExecution stores PATHS, not text, so the error handed back to Codex has
+    to be loaded from the log files.
+    """
+    chunks: list[str] = []
+    for attribute in ("stderr_path", "stdout_path"):
+        path = getattr(execution, attribute, None)
+        if not path:
+            continue
+        try:
+            chunks.append(pathlib.Path(path).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(chunk for chunk in chunks if chunk.strip())

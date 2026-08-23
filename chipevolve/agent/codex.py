@@ -56,6 +56,7 @@ def _build_prompt(
     rtl_path: str,
     metrics: Metrics,
     recalls: list[MemoryReference],
+    dead_ends: list[str] | None = None,
 ) -> str:
     if recalls:
         lessons = "\n".join(f"  - [{item.generation_id}] {item.summary}" for item in recalls)
@@ -65,6 +66,15 @@ def _build_prompt(
         )
     else:
         memory_block = "No prior experiments recorded yet. This is the first generation."
+
+    if dead_ends:
+        banned = "\n".join(f"  - {name}" for name in sorted(set(dead_ends)))
+        memory_block += (
+            "\n\nALREADY MEASURED, PRODUCED ZERO IMPROVEMENT. Proposing any of these\n"
+            "will be rejected by the engine before it is even measured:\n" + banned +
+            "\n\nPick a DIFFERENT transformation. Look at the operation decode, the\n"
+            "duplicated adder, and the unconditionally-evaluated multiplier."
+        )
 
     return f"""You are ChipEvolve's RTL optimization agent.
 
@@ -124,6 +134,7 @@ class CodexMutator:
         metrics: Metrics,
         recalls: list[MemoryReference],
         on_log=None,
+        dead_ends: list[str] | None = None,
     ) -> MutationResult:
         if not codex_available():
             raise CodexUnavailable("codex CLI not found on PATH. Install it or run with --offline.")
@@ -134,9 +145,58 @@ class CodexMutator:
             raise CodexUnavailable(f"RTL file {rtl_path} missing from workspace {workspace}")
 
         before = source_file.read_text(encoding="utf-8")
-        plan_file = workspace / ".codex-plan.json"
-        prompt = _build_prompt(project, before, rtl_path, metrics, recalls)
+        prompt = _build_prompt(project, before, rtl_path, metrics, recalls, dead_ends)
 
+        plan, _ = await self._invoke(workspace, project, prompt, recalls, on_log)
+        after = source_file.read_text(encoding="utf-8")
+        if after == before:
+            raise CodexUnavailable("Codex returned a plan but left the RTL unchanged.")
+        return MutationResult(plan=plan, changed_files=plan.files_to_modify)
+
+    async def repair(
+        self,
+        workspace: Path,
+        project: ProjectConfig,
+        plan: MutationPlan,
+        error_output: str,
+        on_log=None,
+    ) -> MutationResult:
+        """One repair attempt after a failed lint/simulation.
+
+        Codex frequently produces a partially-applied edit — e.g. converting
+        half an if/else chain to a case and leaving a dangling `end ... else`.
+        Feeding the tool error straight back fixes that class of slip. Exactly
+        ONE attempt: an invalid-RTL result is a real experimental outcome, and
+        retrying forever would turn the search into a loop.
+        """
+        rtl_path = project.rtl[0]
+        prompt = f"""Your previous edit to {rtl_path} does not compile.
+
+You attempted: {plan.mutation_type} — {plan.hypothesis}
+
+The tool reported:
+```
+{error_output.strip()[-2000:]}
+```
+
+Fix the file so it compiles and behaves identically to the original for every
+opcode. Keep the same optimization intent. Do not revert to the original
+implementation, and do not touch anything except {rtl_path}.
+
+Then return the mutation plan JSON again, describing the same transformation.
+"""
+        plan, _ = await self._invoke(workspace, project, prompt, [], on_log)
+        return MutationResult(plan=plan, changed_files=plan.files_to_modify)
+
+    async def _invoke(
+        self,
+        workspace: Path,
+        project: ProjectConfig,
+        prompt: str,
+        recalls: list[MemoryReference],
+        on_log,
+    ) -> tuple[MutationPlan, str]:
+        plan_file = workspace / ".codex-plan.json"
         command = [
             "codex", "exec",
             "-C", str(workspace),
@@ -215,12 +275,7 @@ class CodexMutator:
 
         _validate_paths(plan, project)
         plan_file.unlink(missing_ok=True)
-
-        after = source_file.read_text(encoding="utf-8")
-        if after == before:
-            raise CodexUnavailable("Codex returned a plan but left the RTL unchanged.")
-
-        return MutationResult(plan=plan, changed_files=plan.files_to_modify)
+        return plan, prompt
 
 
 def _summarize_event(event: dict) -> str | None:

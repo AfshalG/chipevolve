@@ -88,6 +88,24 @@ class Repository:
             rows = connection.execute(query, params).fetchall()
         return [MemoryObservation.model_validate_json(row["payload"]) for row in rows]
 
+    def bump_counter(self, key: str) -> int:
+        """Increment a named counter (e.g. repeats_avoided) and return it."""
+        current = self.counter(key) + 1
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO project_state (key, payload) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+                (f"counter:{key}", str(current)),
+            )
+        return current
+
+    def counter(self, key: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT payload FROM project_state WHERE key = ?", (f"counter:{key}",)).fetchone()
+        try:
+            return int(row["payload"]) if row else 0
+        except (TypeError, ValueError):
+            return 0
+
     def set_metrics(self, key: str, metrics: Metrics) -> None:
         with self._connect() as connection:
             connection.execute(

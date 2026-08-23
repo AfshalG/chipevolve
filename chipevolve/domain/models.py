@@ -131,6 +131,8 @@ class Generation(BaseModel):
     # "codex" or "offline" — surfaced in the UI so a canned run is never
     # mistaken for a real one.
     agent: str = "codex"
+    # True when Codex fixed its own broken edit after a failed lint.
+    repaired: bool = False
     id: str
     generation_number: int
     parent_id: str | None = None

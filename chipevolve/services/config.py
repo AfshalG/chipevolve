@@ -15,6 +15,7 @@ def load_project_config(root: Path) -> ProjectConfig:
     testbench = raw.get("testbench", {})
     clock = raw.get("clock", {})
     optimization = raw.get("optimization", {})
+    timeouts = raw.get("timeouts", {})
     command = testbench.get("command", ["make", "test"])
     if isinstance(command, str):
         command = shlex.split(command)
@@ -30,5 +31,8 @@ def load_project_config(root: Path) -> ProjectConfig:
         max_generations=int(optimization.get("max_generations", 5)),
         mutable=list(raw.get("mutable", ["rtl/**"])),
         protected=list(raw.get("protected", ["tb/**", "constraints/**", "scripts/evaluation/**", "golden/**"])),
+        lint_timeout_s=float(timeouts.get("lint_s", 60.0)),
+        simulation_timeout_s=float(timeouts.get("simulation_s", 300.0)),
+        synthesis_timeout_s=float(timeouts.get("synthesis_s", 180.0)),
     )
 

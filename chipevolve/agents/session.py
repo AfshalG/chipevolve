@@ -310,6 +310,26 @@ def _supports_output_config(client) -> bool:
     return _stream_accepts(type(client.messages), "output_config")
 
 
+NO_CREDENTIALS_MESSAGE = (
+    "No Anthropic credentials found. Set ANTHROPIC_API_KEY in the environment "
+    "the backend runs in, or set chipevolve.anthropicApiKey in VS Code settings."
+)
+
+
+def credentials_available() -> bool:
+    """True when the backend can authenticate to the Anthropic API.
+
+    Checked at the /api/agent/task boundary so a missing key fails the request
+    outright, instead of allocating a generation workspace and surfacing the
+    error asynchronously on the event stream — where a client that subscribes
+    a moment too late never sees it at all.
+    """
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        if (os.environ.get(name) or "").strip():
+            return True
+    return False
+
+
 def _client():
     try:
         import anthropic
@@ -318,11 +338,8 @@ def _client():
             "The anthropic package is not installed in the backend environment. "
             "Run: pip install 'anthropic>=0.70'"
         ) from error
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        raise AgentUnavailable(
-            "No Anthropic credentials found. Set ANTHROPIC_API_KEY in the environment "
-            "the backend runs in, or set chipevolve.anthropicApiKey in VS Code settings."
-        )
+    if not credentials_available():
+        raise AgentUnavailable(NO_CREDENTIALS_MESSAGE)
     return anthropic.AsyncAnthropic()
 
 

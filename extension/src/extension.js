@@ -137,9 +137,14 @@ async function startBackend(context, showProgress = true) {
 
   if (useWsl) {
     const distro = configuration().distro;
+    // The key must cross into WSL explicitly - the Windows environment does
+    // not carry into the distro, so without this the agent chat is unusable
+    // there even when the setting is filled in.
+    const wslKey = configuration().anthropicApiKey || process.env.ANTHROPIC_API_KEY || "";
     const command = [
       `cd ${shellQuote(toWslPath(backend))}`,
       `export CHIPEVOLVE_PROJECT=${shellQuote(toWslPath(project))}`,
+      ...(wslKey ? [`export ANTHROPIC_API_KEY=${shellQuote(wslKey)}`] : []),
       `PYTHONPATH=. .venv/bin/python ${args.join(" ")}`,
     ].join(" && ");
     output.appendLine(`[extension] Starting backend in WSL (${distro})`);
@@ -149,7 +154,7 @@ async function startBackend(context, showProgress = true) {
     output.appendLine(`[extension] Starting backend: ${python} ${args.join(" ")}`);
     output.appendLine(`[extension] cwd=${backend} project=${project}`);
     const env = { ...process.env, PYTHONPATH: backend, CHIPEVOLVE_PROJECT: project };
-    const apiKey = configuration().anthropicApiKey;
+    const apiKey = configuration().anthropicApiKey || process.env.ANTHROPIC_API_KEY || "";
     if (apiKey) env.ANTHROPIC_API_KEY = apiKey;
     backendProcess = spawn(python, args, { cwd: backend, env, windowsHide: true });
   }
@@ -180,7 +185,7 @@ async function waitForBackend() {
 }
 
 function webviewHtml(webview, context, asset = "dashboard", mode = "dashboard") {
-  const media = vscode.Uri.joinPath(context.extensionUri, "apps", "extension", "media");
+  const media = vscode.Uri.joinPath(context.extensionUri, "extension", "media");
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(media, `${asset}.css`));
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(media, `${asset}.js`));
   const nonce = Math.random().toString(36).slice(2);
@@ -356,7 +361,7 @@ class ChatViewProvider {
     chatView = view;
     view.webview.options = {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.file(path.join(this.context.extensionPath, "apps", "extension", "media"))],
+      localResourceRoots: [vscode.Uri.file(path.join(this.context.extensionPath, "extension", "media"))],
     };
     view.webview.html = webviewHtml(view.webview, this.context, "chat", "sidebar");
     bindMessages(view.webview, this.context);
@@ -379,9 +384,9 @@ function openDashboard(context) {
   dashboardPanel = vscode.window.createWebviewPanel("chipevolve.dashboard", "ChipEvolve · Evolution", vscode.ViewColumn.One, {
     enableScripts: true,
     retainContextWhenHidden: true,
-    localResourceRoots: [vscode.Uri.file(path.join(context.extensionPath, "apps", "extension", "media"))],
+    localResourceRoots: [vscode.Uri.file(path.join(context.extensionPath, "extension", "media"))],
   });
-  dashboardPanel.iconPath = vscode.Uri.file(path.join(context.extensionPath, "apps", "extension", "media", "chip.svg"));
+  dashboardPanel.iconPath = vscode.Uri.file(path.join(context.extensionPath, "extension", "media", "chip.svg"));
   dashboardPanel.webview.html = webviewHtml(dashboardPanel.webview, context);
   bindMessages(dashboardPanel.webview, context);
   const stream = attachEventStream(dashboardPanel.webview);

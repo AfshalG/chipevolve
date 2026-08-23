@@ -39,10 +39,36 @@ Narrate the stages as they stream:
 
 **1:35 — The rejection** (30s)
 
-This is the most important 30 seconds. Show a rejected generation.
+This is the most important 30 seconds, and we have a REAL one captured
+(generation 1, 2026-08-23, verbatim below). Use it.
 
-> Here it tried a shift/add decomposition. Area improved 11%. Logic depth
-> regressed 18%. Rejected. The agent doesn't get a vote.
+Codex proposed a bit-width reduction on `acc_reg`, with the hypothesis:
+
+> *"Reduced acc_reg from 2*WIDTH to WIDTH because its upper half was always
+> written as zero and never observed."*
+
+The diff is clean and correct. Lint passed. All 230 tests passed. Synthesis
+passed. Protected files intact. And then:
+
+```
+              before    after
+cells         510       510
+registers     9         9
+logic depth   18        18
+
+fitness       1.000  →  1.000      improvement 0.0%
+REJECTED — "Candidate does not improve measured fitness."
+```
+
+Say this out loud, it's the whole pitch:
+
+> That change is correct. It's readable. Every human reviewer on this planet
+> would approve it in a code review — it genuinely removes dead bits. And it
+> makes the chip *exactly zero* better, because Yosys already optimized those
+> bits away before the change was ever proposed.
+>
+> An LLM would have told you it improved the design. The tools proved it
+> didn't. That's the entire product.
 
 **2:05 — Memory** (30s)
 

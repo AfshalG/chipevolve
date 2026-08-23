@@ -122,6 +122,12 @@ Now split: 60s to build, 20s to run. A genuine hang is still caught.
 If it feels slow, copy the working folder inside WSL's own filesystem instead
 of running it off `C:\`.
 
+The `backend` branch hit this independently and fixed it the same week —
+its newest commit makes all three timeouts configurable and raises them
+(lint 60s, simulation 300s, synthesis 180s), with a comment noting that
+Verilator compiles C++ before running a single test. Two people finding the
+same thing separately is a good sign it is real.
+
 ---
 
 # Part 2 — The `backend` branch
@@ -138,44 +144,66 @@ talks to over a network connection. The current docs dropped that in favour of
 everything living inside the extension. Everything sits in a folder called
 `temp/`.
 
-Read as an early proof of shape, it does its job — a full loop runs and events
-flow. The items below are what stands between it and a demo.
+Latest commit read: `2b1744a` ("second intial"), 23 Aug 17:36.
 
-## Blocker 1 — the agent is not actually there
+There is more here than the folder name suggests. Read the next section before
+forming a view — the headline finding is not what it looks like at first
+glance.
 
-`temp/backend/chipevolve/services/mutation.py` contains this:
+## There are TWO systems in this branch, and both are switched on
 
-```python
-BASELINE_BLOCK  = """...the before version of the code..."""
-OPTIMIZED_BLOCK = """...the after version..."""
-```
+This is the most important thing to understand before touching anything.
 
-and then swaps one for the other. The improved design was written by hand in
-advance; the program pastes it in.
+**Path A — the real agent.** `temp/backend/chipevolve/agents/` holds a proper
+Claude agent: a streaming conversation loop, eleven tools it can call
+(`read_file`, `write_file`, `replace_in_file`, `run_lint`, `run_simulation`,
+`run_synthesis`, `score_candidate`, `recall_memories`, ...), per-tool user
+approval with a diff preview before anything is written, and a turn limit.
+This is substantial, real work. Reached via `POST /api/agent/task`.
 
-Consequences:
+**Path B — the scripted one.** `temp/backend/chipevolve/services/mutation.py`
+has the before and after versions of the code typed directly into the source
+and does a find-and-replace. Reached via `POST /api/evolve`.
 
-- **Only one change is possible** — the one already written in.
+Both are wired up in `api/main.py`. Which one the demo shows depends on which
+button gets pressed.
+
+### The agent path is good — protect it
+
+Worth calling out because it is better than what the docs asked for: the agent
+**physically cannot** write to a protected file. `tools.py` raises
+`ProtectedPathError` inside the tool itself, so the edit never happens.
+
+That is stronger than checking afterwards whether files changed. The docs
+describe catching a cheat after the fact; this prevents it. Keep it.
+
+### The scripted path is the risk
+
+If `POST /api/evolve` is what runs in the demo, these all apply:
+
+- **Only one change is possible** — the one already typed in.
 - **It can only run once.** After the swap the "before" text is gone, so
   generation 2 fails with `refusing a broad rewrite`. But repeated generations
-  getting better is the entire pitch.
+  getting better is the whole pitch.
 - **It cannot work on the real chip.** It carries its own 33-line ALU that
   matches those strings exactly. Lane A's real one is 119 lines with different
   signal names and no `OP_SLT` — verified. Point it at Lane A's design and it
   stops immediately.
 
-**Fix:** replace the hard-coded swap with a real agent call that returns a
-`MutationPlan`, validate the plan before applying it, and confirm every file it
-wants to touch is inside the allowed list.
+**Decide which path is the product.** If it is the agent, the scripted one is
+dead weight that will be demoed by accident — delete it or take the endpoint
+away. If the scripted one is intentional demo insurance for when the API is
+down, that is defensible, but label it clearly so nobody presents it as the
+agent working.
 
-## Blocker 2 — the example chip does not match Lane A's
+## Problem — the example chip does not match Lane A's
 
 Two different ALUs exist: `temp/examples/alu/rtl/alu.sv` (33 lines) and
 `examples/alu/rtl/alu.sv` on `lane-a-rtl` (119 lines, tested, 230 test cases).
 
 **Fix:** delete the toy one. Use Lane A's. It is the verified one.
 
-## Blocker 3 — the scoring formula mostly evaporates
+## Problem — the scoring formula mostly evaporates
 
 `temp/backend/chipevolve/scoring/fitness.py` scores on four things: power,
 area, speed, congestion. We measure none of power, speed, or congestion. The
@@ -292,18 +320,24 @@ from Lane B means "not checked".
 2. Wire in Lane B (Part 1) and confirm real numbers appear
 3. Move the anti-cheat check in and fill `protectedFilesModified` properly
 4. Fix the scoring formula to use gate count and depth
-5. Replace the hard-coded swap with a real agent call ← the big one
+5. Decide which path is the product — the agent or the scripted swap — and
+   remove or clearly label the other ← the important one
 6. Fix Lane A's two search patterns
 7. Delete the committed build junk
 
-Items 1–4 are small and make what already exists honest. Item 5 is the real
-work.
+Items 1–4 are small and make what already exists honest. Item 5 is a decision,
+not a build — the agent is already written.
 
 ---
 
 # One caveat on Part 2
 
 This is a read of the code only — nobody who wrote it has been asked about it.
-There may be a plan to replace the hard-coded swap with a real agent call that
-simply is not in the branch yet. Worth checking before treating any of it as
-settled.
+
+An earlier draft of this document claimed the agent did not exist at all. That
+was wrong: the first pass through the branch missed the `agents/` folder
+entirely. The agent is real and it is the most substantial code on the branch.
+Anyone who saw that earlier claim should disregard it.
+
+The open question is not "is there an agent" but "which of the two paths is
+the one being demoed" — and only the author can answer that.

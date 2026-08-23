@@ -1,3 +1,8 @@
+> **STATUS: COMPLETE AND VERIFIED 2026-08-23.** The design, testbench, and
+> synthesis script are built, measured, and on `development`. Baseline is
+> 510 cells / 9 registers / depth 18, 230/230 tests. See `docs/BASELINE.md`.
+> This doc is kept for context — do not rebuild the ALU from it.
+
 # Lane A — Design & ground truth
 
 **You are the critical path.** Nothing downstream is real until your baseline
@@ -39,7 +44,7 @@ So, before you write the real design:
 
 1. Make a scratch directory **outside the repo** (`/tmp/probe/`).
 2. Write the naive version and the optimized version of a candidate.
-3. Synthesize both with `yosys -p "read_verilog -sv f.sv; synth -top alu; stat"`.
+3. Synthesize both with `yosys -s ../../scripts/synth.ys` (not a hand-rolled script).
 4. Compare `Number of cells`.
 
 **You need a gap of at least ~5%.** If the two versions produce the same cell
@@ -79,8 +84,8 @@ Two or three confirmed opportunities is right. That's several real generations.
 ## Done when
 
 ```bash
-verilator --lint-only -Wall examples/alu/rtl/alu.sv              # clean
-verilator --binary --timing examples/alu/tb/alu_tb.sv && ./obj_dir/Valu_tb
+verilator --lint-only -Wall -Wno-UNUSEDSIGNAL --top-module alu rtl/alu.sv   # clean
+verilator --binary --timing -Wno-UNUSEDSIGNAL -Wno-fatal --top-module alu_tb tb/alu_tb.sv rtl/alu.sv -o alu_tb && ./obj_dir/alu_tb
 yosys -s scripts/synth.ys                                        # prints cell stats
 ```
 
@@ -128,7 +133,7 @@ project:
 rtl:
   - rtl/alu.sv
 testbench:
-  command: verilator --binary --timing tb/alu_tb.sv && ./obj_dir/Valu_tb
+  command: verilator --binary --timing -Wno-UNUSEDSIGNAL -Wno-fatal --top-module alu_tb tb/alu_tb.sv rtl/alu.sv -o alu_tb
 clock:
   name: clk
   period_ns: 10

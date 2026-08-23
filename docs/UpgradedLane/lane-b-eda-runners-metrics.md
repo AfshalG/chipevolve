@@ -33,19 +33,23 @@ Swap in A's real design at 14:15. You lose nothing by starting cold.
 
 ## Yosys
 
-```tcl
-read_verilog -sv rtl/alu.sv
-synth -top alu
-stat
-ltp -noff
+**Use `scripts/synth.ys`. Do not hand-roll the script.**
+
+```bash
+cd examples/alu && yosys -s ../../scripts/synth.ys
 ```
+
+`synth.ys` runs explicit passes plus `abc -g AND,OR,XOR,NAND,NOR,XNOR`. A bare
+`synth -top alu` produces *different cell counts*, which will not match the
+measured baseline in `docs/BASELINE.md` and will cost you an hour chasing a
+bug that isn't there.
 
 ### Parsing `stat`
 
 | Field | Source line | Notes |
 |---|---|---|
-| `cellCount` | `Number of cells` | **This is the primary fitness input.** C's scoring depends on it. |
-| `registerCount` | sum of `$_DFF_*` / `$dff` rows | Zero if A's ALU is combinational — that's fine, not a bug |
+| `cellCount` | `Number of cells` | **510** at baseline. Primary fitness input — C's scoring depends on it. |
+| `registerCount` | sum of `$_DFF_*` rows | **9** at baseline (`$_DFF_PN0_`). The ALU output is registered. |
 | `areaUm2` | `Chip area for module` | Only appears with `-liberty`. **You are not passing a liberty file, so this is always `null`.** Leave it null. Don't fake it. |
 
 ### Parsing `ltp -noff`
@@ -65,12 +69,23 @@ to do. `ltp` gives you the same signal for a tenth of the effort.
 
 Two calls:
 
-1. `verilator --lint-only -Wall` → `lintPassed`
-2. `verilator --binary --timing tb/alu_tb.sv && ./obj_dir/Valu_tb` →
-   `simulationPassed`, plus parse `TESTS: n/m PASSED`
+These are **verified working** — see `docs/BASELINE.md`. Use them verbatim.
 
-Confirm the exact command with A — if their testbench is combinational they may
-drop `--timing`.
+1. Lint:
+   ```bash
+   verilator --lint-only -Wall -Wno-UNUSEDSIGNAL --top-module alu rtl/alu.sv
+   ```
+   `-Wno-UNUSEDSIGNAL` is **required**. Plain `-Wall` FAILS on the baseline:
+   Verilator flags the unused upper bits of `mul_result` and `acc_reg`, which
+   are seeded opportunities 3 and 4. Without the flag, generation 0 fails its
+   own lint gate and the pipeline looks broken on first run.
+
+2. Build + run:
+   ```bash
+   verilator --binary --timing -Wno-UNUSEDSIGNAL -Wno-fatal --top-module alu_tb tb/alu_tb.sv rtl/alu.sv -o alu_tb
+   ./obj_dir/alu_tb          # NOTE: alu_tb, not Valu_tb — the -o flag renames it
+   ```
+   Parse `TESTS: 230/230 PASSED`.
 
 ### `failureReason` is a demo asset, not a log field
 
@@ -133,3 +148,19 @@ don't start it before then.
 - **15:00** — C swaps your real `runYosys` in for their stub. Make sure
   `cellCount` and `logicDepth` are populated and `areaUm2` is `null` by then.
   Tell C explicitly that `areaUm2` is null so they don't build fitness on it.
+
+
+---
+
+## Baseline you must reproduce
+
+| Metric | Value |
+|---|---|
+| `cellCount` | 510 |
+| `registerCount` | 9 |
+| `logicDepth` | 18 |
+| `areaUm2` | `null` |
+| tests | 230/230 |
+
+If your parser returns anything else on unmodified RTL, your parser is wrong —
+not the design. Regexes are in `docs/BASELINE.md`.

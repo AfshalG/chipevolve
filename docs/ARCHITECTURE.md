@@ -6,9 +6,9 @@
 
 ```
 ┌─ VS Code extension (JS) ─────────────────────────────────────┐
-│  extension/src/extension.js                                  │
-│    spawns the backend, opens the webview, polls/streams       │
-│    events, renders lineage + metrics                          │
+│  extension/src/extension.js   9 commands, sidebar view        │
+│  extension/media/dashboard.js lineage, metrics, activity      │
+│  extension/media/chat.js      agent chat + approval prompts   │
 └───────────────────────┬──────────────────────────────────────┘
                         │ HTTP — 127.0.0.1:8000
 ┌───────────────────────┴──────────────────────────────────────┐
@@ -18,6 +18,8 @@
 │  cli.py                 analyze | evolve | status [--offline] │
 │                                                              │
 │  services/evolution.py  the generation loop                  │
+│  agents/session.py      interactive chat (Claude, 3 modes)   │
+│  agents/tools.py        13 tools, approval + path guards     │
 │  services/workspace.py  isolated gen-N dirs                  │
 │  services/integrity.py  SHA-256 protected-file gate          │
 │  services/mutation.py   canned fallback (offline only)       │
@@ -52,6 +54,16 @@ codex exec -C <workspace> -s workspace-write --skip-git-repo-check \
 The prompt carries the RTL, the current measured metrics, and recalled memory
 lessons ("gen-2 tried shift/add, depth regressed 18%, rejected").
 
+## Two agents, two jobs — don't confuse them
+
+| | drives | provider |
+|---|---|---|
+| `agent/codex.py` | the automated **evolve** loop — proposes and applies one mutation per generation | **Codex CLI** |
+| `agents/session.py` | the interactive **chat** panel — generate / review / optimize, human in the loop | Anthropic SDK |
+
+Codex is the optimizer. The chat is an assistive panel beside it. They share
+the tool layer's protected-path rules but nothing else.
+
 ## Three independent defenses against reward hacking
 
 Deliberately redundant, because the testbench lives *inside* the sandbox:
@@ -62,6 +74,14 @@ Deliberately redundant, because the testbench lives *inside* the sandbox:
 3. `services/integrity.py` — protected files are SHA-256 hashed before and
    after, and any delta rejects the generation. **This runs regardless of what
    the sandbox allowed or what Codex claimed.**
+
+> **Historical bug worth knowing about.** This used `Path.glob(pattern)`, and
+> `glob("tb/**")` returns only the *directory* `tb`, which the `is_file()`
+> filter dropped. `protected_hashes()` therefore returned `{}` for every
+> pattern and `integrity_matches({}, {})` was always `True` — the gate was
+> inert. It now uses `fnmatch`, matching `agents/tools.py::is_protected`
+> exactly, and an empty protected set counts as a failure to verify rather than
+> a pass. Regression tests in `tests/test_integrity.py`.
 
 ## Gate order is the product
 

@@ -1,0 +1,28 @@
+# Everything the extension does not need at runtime.
+
+.git/**
+.gitignore
+.agents/**
+.vscode/**
+.smoke/**
+
+# Node tooling — the extension is plain JS with no bundle step.
+node_modules/**
+package-lock.json
+
+# Python virtualenvs are machine- and OS-specific; the user creates their own.
+backend/.venv/**
+backend/**/__pycache__/**
+backend/**/*.pyc
+backend/.pytest_cache/**
+backend/.ruff_cache/**
+
+# Per-project agent state, logs, and generation workspaces.
+**/.chipevolve/**
+**/*.sqlite3
+**/*.db
+
+# Source-only material.
+tests/**
+Codex Build Prompt — ChipEvolve.md
+**/.DS_Store

@@ -1,0 +1,25 @@
+project:
+  name: demo-alu
+  top: alu
+
+rtl:
+  - rtl/alu.sv
+
+testbench:
+  command:
+    - bash
+    - -lc
+    - verilator --binary --timing -Wno-fatal --top-module alu_tb tb/alu_tb.sv rtl/alu.sv -o alu_sim && ./obj_dir/alu_sim
+
+clock:
+  name: clk
+  period_ns: 10
+
+optimization:
+  objective: balanced
+  max_generations: 5
+
+protected:
+  - tb/**
+  - constraints/**
+

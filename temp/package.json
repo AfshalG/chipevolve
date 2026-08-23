@@ -1,0 +1,165 @@
+{
+  "name": "chipevolve",
+  "displayName": "ChipEvolve",
+  "description": "Your chip gets better every generation.",
+  "version": "0.1.0",
+  "publisher": "chipevolve",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization",
+    "Testing"
+  ],
+  "keywords": [
+    "Verilog",
+    "SystemVerilog",
+    "RTL",
+    "Yosys",
+    "Verilator",
+    "EDA"
+  ],
+  "activationEvents": [
+    "onView:chipevolve.chat"
+  ],
+  "main": "./apps/extension/src/extension.js",
+  "scripts": {
+    "check": "node --check apps/extension/src/extension.js && node --check apps/extension/media/chat.js && node --check apps/extension/media/dashboard.js",
+    "test": "npm run check",
+    "package": "vsce package --no-dependencies --out chipevolve.vsix"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "chipevolve.newTask",
+        "title": "ChipEvolve: New Task",
+        "icon": "$(add)"
+      },
+      {
+        "command": "chipevolve.generateRtl",
+        "title": "ChipEvolve: Generate RTL",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "chipevolve.reviewRtl",
+        "title": "ChipEvolve: Review RTL",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "chipevolve.optimizeRtl",
+        "title": "ChipEvolve: Optimize RTL",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "chipevolve.openDashboard",
+        "title": "ChipEvolve: Open Evolution Dashboard",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "chipevolve.startBackend",
+        "title": "ChipEvolve: Start WSL Backend"
+      },
+      {
+        "command": "chipevolve.establishBaseline",
+        "title": "ChipEvolve: Establish Baseline"
+      },
+      {
+        "command": "chipevolve.evolve",
+        "title": "ChipEvolve: Evolve Current Project",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "chipevolve.openDemoProject",
+        "title": "ChipEvolve: Open Demo RTL"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "chipevolve",
+          "title": "ChipEvolve",
+          "icon": "apps/extension/media/chip.svg"
+        }
+      ]
+    },
+    "views": {
+      "chipevolve": [
+        {
+          "type": "webview",
+          "id": "chipevolve.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "chipevolve.newTask",
+          "when": "view == chipevolve.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "chipevolve.openDashboard",
+          "when": "view == chipevolve.chat",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "chipevolve.reviewRtl",
+          "when": "resourceExtname == .sv || resourceExtname == .v",
+          "group": "navigation@1"
+        },
+        {
+          "command": "chipevolve.optimizeRtl",
+          "when": "resourceExtname == .sv || resourceExtname == .v",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ChipEvolve",
+      "properties": {
+        "chipevolve.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "ChipEvolve FastAPI backend URL."
+        },
+        "chipevolve.wslDistro": {
+          "type": "string",
+          "default": "Ubuntu",
+          "description": "WSL distribution used for Python and EDA tools."
+        },
+        "chipevolve.projectPath": {
+          "type": "string",
+          "default": "examples/alu",
+          "description": "Project path relative to the extension root, or an absolute path."
+        },
+        "chipevolve.model": {
+          "type": "string",
+          "default": "claude-opus-5",
+          "enum": [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5"
+          ],
+          "description": "Claude model used by the RTL agent."
+        },
+        "chipevolve.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Anthropic API key passed to the backend. Leave empty to use `ANTHROPIC_API_KEY` from the environment instead."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chipevolve/chipevolve"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.2.0"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "chipevolve",
+  "displayName": "ChipEvolve",
+  "description": "Your chip gets better every generation. Autonomous RTL optimization judged by real EDA tools.",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "chipevolve.evolve", "title": "ChipEvolve: Evolve" },
+      { "command": "chipevolve.openPanel", "title": "ChipEvolve: Open Panel" },
+      { "command": "chipevolve.baseline", "title": "ChipEvolve: Establish Baseline" }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,16 @@
+node_modules/
+out/
+dist/
+*.vsix
+.vscode-test/
+
+# ChipEvolve run artifacts
+.chipevolve/
+obj_dir/
+*.log
+*.blif
+*.json.tmp
+
+.DS_Store
+.env
+.env.*

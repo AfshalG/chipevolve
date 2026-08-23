@@ -115,6 +115,25 @@ the same transformation hoping for a different measurement.
 MODES = {"generate": GENERATE, "review": REVIEW, "optimize": OPTIMIZE}
 
 
+def editor_context(focus_path: str | None, open_files: list[str], selection: tuple[int, int] | None) -> str:
+    """What the user is actually looking at in VS Code, handed to the agent as context."""
+    if not focus_path and not open_files:
+        return ""
+    lines = ["", "# Editor context", ""]
+    if focus_path:
+        where = f"`{focus_path}`"
+        if selection and selection[0] != selection[1]:
+            where += f", lines {selection[0]}-{selection[1]} selected"
+        elif selection:
+            where += f", cursor on line {selection[0]}"
+        lines.append(f"The user is looking at {where}. Treat it as the target unless they say otherwise.")
+    others = [item for item in open_files if item != focus_path]
+    if others:
+        lines.append("Also open in the editor: " + ", ".join(f"`{item}`" for item in others))
+    lines.append("")
+    return "\n".join(lines)
+
+
 def system_prompt(mode: str, project: ProjectConfig, workspace_label: str) -> str:
     if mode not in MODES:
         raise ValueError(f"unknown mode: {mode}")

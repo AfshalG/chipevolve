@@ -74,6 +74,8 @@ class AgentSession:
     pending: dict[str, PendingApproval] = field(default_factory=dict)
     task: asyncio.Task | None = None
     context: ToolContext | None = None
+    # Rendered description of what the user has open in VS Code.
+    editor_note: str = ""
 
     @property
     def edited_files(self) -> list[str]:
@@ -175,7 +177,8 @@ class AgentSession:
             toolchain=self.toolchain,
             memory=EngineeringMemory(self.repository),
         )
-        self.messages.append({"role": "user", "content": user_message})
+        opening = f"{user_message}\n{self.editor_note}" if self.editor_note else user_message
+        self.messages.append({"role": "user", "content": opening})
         system = prompts.system_prompt(self.mode, self.project, self.workspace_label)
         definitions = tools.definitions_for(self.mode)
 
@@ -344,7 +347,14 @@ class SessionManager:
         number = max((item.generation_number for item in existing), default=0) + 1
         return self.workspaces.create(number), f"generation workspace gen-{number:03d}"
 
-    async def start(self, mode: str, message: str, model: str, auto_approve: list[str]) -> AgentSession:
+    async def start(
+        self,
+        mode: str,
+        message: str,
+        model: str,
+        auto_approve: list[str],
+        editor_note: str = "",
+    ) -> AgentSession:
         if self.busy:
             raise RuntimeError("A task is already running. Cancel it before starting another.")
         workspace, label = self._workspace_for(mode)
@@ -359,6 +369,7 @@ class SessionManager:
             workspace_label=label,
             model=model or DEFAULT_MODEL,
             auto_approve=set(auto_approve or []),
+            editor_note=editor_note,
         )
         self.current = session
         session.task = asyncio.create_task(session.run(message))

@@ -2,7 +2,7 @@
   "name": "chipevolve",
   "displayName": "ChipEvolve",
   "description": "Your chip gets better every generation.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "chipevolve",
   "license": "MIT",
   "engines": {
@@ -22,21 +22,18 @@
     "EDA"
   ],
   "activationEvents": [
-    "onView:chipevolve.chat"
+    "onLanguage:systemverilog",
+    "onLanguage:verilog",
+    "onStartupFinished"
   ],
   "main": "./apps/extension/src/extension.js",
   "scripts": {
-    "check": "node --check apps/extension/src/extension.js && node --check apps/extension/media/chat.js && node --check apps/extension/media/dashboard.js",
+    "check": "node --check apps/extension/src/extension.js && node --check apps/extension/media/dashboard.js",
     "test": "npm run check",
     "package": "vsce package --no-dependencies --out chipevolve.vsix"
   },
   "contributes": {
     "commands": [
-      {
-        "command": "chipevolve.newTask",
-        "title": "ChipEvolve: New Task",
-        "icon": "$(add)"
-      },
       {
         "command": "chipevolve.generateRtl",
         "title": "ChipEvolve: Generate RTL",
@@ -53,69 +50,74 @@
         "icon": "$(rocket)"
       },
       {
+        "command": "chipevolve.cancelTask",
+        "title": "ChipEvolve: Cancel Running Task"
+      },
+      {
+        "command": "chipevolve.applyEdits",
+        "title": "ChipEvolve: Apply Candidate To Project"
+      },
+      {
+        "command": "chipevolve.establishBaseline",
+        "title": "ChipEvolve: Measure Baseline"
+      },
+      {
         "command": "chipevolve.openDashboard",
         "title": "ChipEvolve: Open Evolution Dashboard",
         "icon": "$(pulse)"
       },
       {
+        "command": "chipevolve.showLog",
+        "title": "ChipEvolve: Show Log"
+      },
+      {
+        "command": "chipevolve.clearFindings",
+        "title": "ChipEvolve: Clear Review Findings"
+      },
+      {
         "command": "chipevolve.startBackend",
-        "title": "ChipEvolve: Start WSL Backend"
+        "title": "ChipEvolve: Start Backend"
       },
       {
-        "command": "chipevolve.establishBaseline",
-        "title": "ChipEvolve: Establish Baseline"
-      },
-      {
-        "command": "chipevolve.evolve",
-        "title": "ChipEvolve: Evolve Current Project",
-        "icon": "$(run-all)"
-      },
-      {
-        "command": "chipevolve.openDemoProject",
-        "title": "ChipEvolve: Open Demo RTL"
+        "command": "chipevolve.showActions",
+        "title": "ChipEvolve: Actions"
       }
     ],
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "chipevolve",
-          "title": "ChipEvolve",
-          "icon": "apps/extension/media/chip.svg"
-        }
-      ]
-    },
-    "views": {
-      "chipevolve": [
-        {
-          "type": "webview",
-          "id": "chipevolve.chat",
-          "name": "Chat"
-        }
-      ]
-    },
     "menus": {
-      "view/title": [
-        {
-          "command": "chipevolve.newTask",
-          "when": "view == chipevolve.chat",
-          "group": "navigation@1"
-        },
-        {
-          "command": "chipevolve.openDashboard",
-          "when": "view == chipevolve.chat",
-          "group": "navigation@2"
-        }
-      ],
       "editor/title": [
         {
           "command": "chipevolve.reviewRtl",
-          "when": "resourceExtname == .sv || resourceExtname == .v",
+          "when": "resourceExtname == .sv || resourceExtname == .v || resourceExtname == .svh",
           "group": "navigation@1"
         },
         {
           "command": "chipevolve.optimizeRtl",
-          "when": "resourceExtname == .sv || resourceExtname == .v",
+          "when": "resourceExtname == .sv || resourceExtname == .v || resourceExtname == .svh",
           "group": "navigation@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "chipevolve.reviewRtl",
+          "when": "resourceExtname == .sv || resourceExtname == .v || resourceExtname == .svh",
+          "group": "chipevolve@1"
+        },
+        {
+          "command": "chipevolve.optimizeRtl",
+          "when": "resourceExtname == .sv || resourceExtname == .v || resourceExtname == .svh",
+          "group": "chipevolve@2"
+        },
+        {
+          "command": "chipevolve.generateRtl",
+          "when": "resourceExtname == .sv || resourceExtname == .v || resourceExtname == .svh",
+          "group": "chipevolve@3"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "chipevolve.reviewRtl",
+          "when": "resourceExtname == .sv || resourceExtname == .v || resourceExtname == .svh",
+          "group": "chipevolve@1"
         }
       ]
     },
@@ -134,8 +136,8 @@
         },
         "chipevolve.projectPath": {
           "type": "string",
-          "default": "examples/alu",
-          "description": "Project path relative to the extension root, or an absolute path."
+          "default": "",
+          "markdownDescription": "Absolute path to the RTL project. Leave empty to follow your open workspace folder (the nearest directory containing `project.yaml`, otherwise the workspace root)."
         },
         "chipevolve.model": {
           "type": "string",
@@ -151,6 +153,22 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Anthropic API key passed to the backend. Leave empty to use `ANTHROPIC_API_KEY` from the environment instead."
+        },
+        "chipevolve.autoApprove": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "read",
+              "edit",
+              "run"
+            ]
+          },
+          "default": [
+            "read",
+            "run"
+          ],
+          "markdownDescription": "Tool classes to run without asking. `edit` is withheld by default so file changes are always confirmed."
         }
       }
     }

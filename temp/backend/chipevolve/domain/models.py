@@ -185,6 +185,9 @@ class ProjectSnapshot(BaseModel):
 
 
 class EvolutionEvent(BaseModel):
+    # Monotonic per-process id so a client that ends up with more than one
+    # event-stream connection can discard replays instead of rendering them twice.
+    seq: int = 0
     type: str
     generation: int | None = None
     stage: GenerationStage | None = None

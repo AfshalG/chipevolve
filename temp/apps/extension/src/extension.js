@@ -5,11 +5,22 @@ const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
 
-let dashboardPanel;
+const RTL_LANGUAGES = new Set(["systemverilog", "verilog"]);
+const RTL_EXTENSIONS = new Set([".sv", ".v", ".svh", ".vh"]);
+
+const MODE_LABEL = { generate: "Generate", review: "Review", optimize: "Optimize" };
+
 let backendProcess;
-let chatView;
-let chatStream;
-let taskWorkspace;
+let dashboardPanel;
+let stream;
+let output;
+let statusItem;
+let diagnostics;
+
+/** Everything about the task currently in flight. */
+let task = null;
+
+// --------------------------------------------------------------------- config
 
 function configuration() {
   const config = vscode.workspace.getConfiguration("chipevolve");
@@ -19,12 +30,61 @@ function configuration() {
     projectPath: config.get("projectPath", "examples/alu"),
     model: config.get("model", "claude-opus-5"),
     apiKey: config.get("anthropicApiKey", ""),
+    autoApprove: config.get("autoApprove", ["read", "run"]),
   };
 }
 
-function projectRoot(context) {
+/**
+ * Where generated and edited files land. Priority:
+ *   1. an absolute chipevolve.projectPath, if the user pinned one
+ *   2. the nearest folder with a project.yaml, walking up from the active file
+ *   3. the workspace folder that owns the active file
+ *   4. the first workspace folder
+ *   5. the bundled demo, only when no folder is open at all
+ */
+function resolveProjectRoot(context) {
   const configured = configuration().projectPath;
-  return path.isAbsolute(configured) ? configured : path.join(context.extensionPath, configured);
+  if (configured && path.isAbsolute(configured)) return configured;
+
+  const editor = vscode.window.activeTextEditor;
+  const folders = vscode.workspace.workspaceFolders || [];
+
+  if (editor && editor.document.uri.scheme === "file") {
+    const owner = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+    const stop = owner ? path.resolve(owner.uri.fsPath) : null;
+    let dir = path.dirname(editor.document.fileName);
+    for (let hops = 0; hops < 24; hops += 1) {
+      if (fs.existsSync(path.join(dir, "project.yaml"))) return dir;
+      if (stop && path.resolve(dir) === stop) break;
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    if (owner) return owner.uri.fsPath;
+  }
+
+  if (folders.length) {
+    const withProject = folders.find((folder) => fs.existsSync(path.join(folder.uri.fsPath, "project.yaml")));
+    return (withProject || folders[0]).uri.fsPath;
+  }
+  return path.join(context.extensionPath, configured || "examples/alu");
+}
+
+/** The root the backend is currently pointed at. */
+let activeRoot;
+
+function projectRoot(context) {
+  return activeRoot || resolveProjectRoot(context);
+}
+
+/** Point the backend at the right directory before running anything. */
+async function ensureProject(context) {
+  const desired = resolveProjectRoot(context);
+  const result = await requestJson(
+    "POST", `${configuration().backendUrl}/api/project/open`, { root: desired }, 30000);
+  activeRoot = result.root || desired;
+  if (result.changed) output.appendLine(`[extension] project: ${activeRoot}`);
+  return activeRoot;
 }
 
 function toWslPath(windowsPath) {
@@ -37,28 +97,81 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
 }
 
-function requestJson(method, target, body) {
+// ---------------------------------------------------------------- editor view
+
+function isRtlDocument(document) {
+  if (!document || document.uri.scheme !== "file") return false;
+  return RTL_LANGUAGES.has(document.languageId) || RTL_EXTENSIONS.has(path.extname(document.fileName).toLowerCase());
+}
+
+/** Make a path relative to the project root, or null when it lives outside it. */
+function relativeToProject(context, absolute) {
+  const root = path.resolve(projectRoot(context));
+  const relative = path.relative(root, path.resolve(absolute));
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return relative.split(path.sep).join("/");
+}
+
+/**
+ * What the user is looking at right now: the active RTL file, any selection in
+ * it, and every other RTL file they have open.
+ */
+function editorContext(context) {
+  const editor = vscode.window.activeTextEditor;
+  const focus = editor && isRtlDocument(editor.document) ? relativeToProject(context, editor.document.fileName) : null;
+
+  const open = [];
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      const uri = tab.input && tab.input.uri;
+      if (!uri || uri.scheme !== "file") continue;
+      if (!RTL_EXTENSIONS.has(path.extname(uri.fsPath).toLowerCase())) continue;
+      const relative = relativeToProject(context, uri.fsPath);
+      if (relative && !open.includes(relative)) open.push(relative);
+    }
+  }
+
+  let selection = null;
+  if (focus && editor && !editor.selection.isEmpty) {
+    selection = [editor.selection.start.line + 1, editor.selection.end.line + 1];
+  } else if (focus && editor) {
+    selection = [editor.selection.active.line + 1, editor.selection.active.line + 1];
+  }
+  return { focus, open, selection, editor };
+}
+
+// -------------------------------------------------------------------- backend
+
+function requestJson(method, target, body, timeout = 10000) {
   return new Promise((resolve, reject) => {
     const url = new URL(target);
     const transport = url.protocol === "https:" ? https : http;
     const payload = body === undefined ? undefined : JSON.stringify(body);
-    const request = transport.request(url, {
-      method,
-      headers: payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {},
-      timeout: 5000,
-    }, (response) => {
-      let data = "";
-      response.setEncoding("utf8");
-      response.on("data", (chunk) => { data += chunk; });
-      response.on("end", () => {
-        if ((response.statusCode ?? 500) >= 400) {
-          reject(new Error(data || `Backend returned ${response.statusCode}`));
-          return;
-        }
-        try { resolve(data ? JSON.parse(data) : {}); }
-        catch (error) { reject(error); }
-      });
-    });
+    const request = transport.request(
+      url,
+      {
+        method,
+        headers: payload
+          ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }
+          : {},
+        timeout,
+      },
+      (response) => {
+        let data = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => { data += chunk; });
+        response.on("end", () => {
+          if ((response.statusCode ?? 500) >= 400) {
+            let detail = data;
+            try { detail = JSON.parse(data).detail || data; } catch { /* keep raw body */ }
+            reject(new Error(detail || `Backend returned ${response.statusCode}`));
+            return;
+          }
+          try { resolve(data ? JSON.parse(data) : {}); }
+          catch (error) { reject(error); }
+        });
+      },
+    );
     request.on("timeout", () => request.destroy(new Error("Backend request timed out")));
     request.on("error", reject);
     if (payload) request.write(payload);
@@ -68,7 +181,7 @@ function requestJson(method, target, body) {
 
 async function backendReady() {
   try {
-    await requestJson("GET", `${configuration().backendUrl}/api/health`);
+    await requestJson("GET", `${configuration().backendUrl}/api/health`, undefined, 3000);
     return true;
   } catch {
     return false;
@@ -79,9 +192,6 @@ async function startBackend(context, showProgress = true) {
   if (await backendReady()) return true;
   if (backendProcess && backendProcess.exitCode === null) return waitForBackend();
 
-  const output = vscode.window.createOutputChannel("ChipEvolve");
-  context.subscriptions.push(output);
-  output.show(true);
   const backend = toWslPath(path.join(context.extensionPath, "backend"));
   const project = toWslPath(projectRoot(context));
   const { distro, apiKey } = configuration();
@@ -94,15 +204,18 @@ async function startBackend(context, showProgress = true) {
     "PYTHONPATH=. .venv/bin/python -m uvicorn chipevolve.api.main:app --host 127.0.0.1 --port 8000",
   ].join(" && ");
 
-  output.appendLine(`[extension] Starting backend in WSL distribution ${distro}`);
+  output.appendLine(`[extension] starting backend in WSL distribution ${distro}`);
   backendProcess = spawn("wsl.exe", ["-d", distro, "--", "bash", "-lc", command], { windowsHide: true });
   backendProcess.stdout.on("data", (chunk) => output.append(chunk.toString()));
   backendProcess.stderr.on("data", (chunk) => output.append(chunk.toString()));
-  backendProcess.on("exit", (code) => output.appendLine(`[extension] Backend exited with code ${code}`));
+  backendProcess.on("exit", (code) => output.appendLine(`[extension] backend exited with code ${code}`));
 
   const wait = waitForBackend();
   if (!showProgress) return wait;
-  return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Starting ChipEvolve in WSL…" }, () => wait);
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Starting ChipEvolve backend…" },
+    () => wait,
+  );
 }
 
 async function waitForBackend() {
@@ -110,84 +223,272 @@ async function waitForBackend() {
     if (await backendReady()) return true;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  vscode.window.showErrorMessage("ChipEvolve backend did not start. Run ‘WSL: Show Log’ in the ChipEvolve output and install backend/.venv dependencies.");
+  vscode.window.showErrorMessage(
+    "ChipEvolve backend did not start. Check the ChipEvolve output channel and install backend dependencies.",
+  );
   return false;
 }
 
-function webviewHtml(webview, context, asset = "dashboard", mode = "dashboard") {
-  const media = vscode.Uri.joinPath(context.extensionUri, "apps", "extension", "media");
-  const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(media, `${asset}.css`));
-  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(media, `${asset}.js`));
-  const nonce = Math.random().toString(36).slice(2);
-  return `<!doctype html>
-  <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
-  <link rel="stylesheet" href="${styleUri}"><title>ChipEvolve</title></head>
-  <body data-mode="${mode}"><div id="app"></div><script nonce="${nonce}" src="${scriptUri}"></script></body></html>`;
+// ------------------------------------------------------------------ native UI
+
+function setStatus(text, busy = false) {
+  if (!statusItem) return;
+  statusItem.text = busy ? `$(sync~spin) ChipEvolve: ${text}` : `$(circuit-board) ChipEvolve: ${text}`;
+  statusItem.show();
 }
 
-function postSnapshot(webview) {
-  const base = configuration().backendUrl;
-  requestJson("GET", `${base}/api/project`)
-    .then((snapshot) => webview.postMessage({ type: "snapshot", snapshot }))
-    .catch((error) => webview.postMessage({ type: "offline", message: error.message }));
+const SEVERITY = {
+  critical: vscode.DiagnosticSeverity.Error,
+  high: vscode.DiagnosticSeverity.Error,
+  medium: vscode.DiagnosticSeverity.Warning,
+  low: vscode.DiagnosticSeverity.Information,
+};
+
+/** Review findings become squiggles on the real file and rows in Problems. */
+function publishFindings(context, findings) {
+  diagnostics.clear();
+  const byFile = new Map();
+  for (const finding of findings) {
+    const absolute = path.join(projectRoot(context), finding.path);
+    const line = Math.max(0, (finding.line || 1) - 1);
+    const range = new vscode.Range(line, 0, line, Number.MAX_SAFE_INTEGER);
+    const diagnostic = new vscode.Diagnostic(
+      range,
+      `${finding.title}\n\n${finding.detail || ""}${finding.suggestion ? `\n\nFix: ${finding.suggestion}` : ""}`.trim(),
+      SEVERITY[finding.severity] ?? vscode.DiagnosticSeverity.Information,
+    );
+    diagnostic.source = "ChipEvolve";
+    diagnostic.code = finding.severity;
+    const key = absolute;
+    if (!byFile.has(key)) byFile.set(key, []);
+    byFile.get(key).push(diagnostic);
+  }
+  for (const [file, items] of byFile) {
+    diagnostics.set(vscode.Uri.file(file), items);
+  }
+  return byFile.size;
 }
 
-/** Long-lived SSE subscription that survives a backend restart. */
-function attachEventStream(webview) {
-  let request;
-  let timer;
-  let closed = false;
+/** Show the pending edit as a real diff editor, backed by a temp file. */
+async function showPendingDiff(context, preview) {
+  if (!preview || !preview.path) return;
+  const original = vscode.Uri.file(path.join(projectRoot(context), preview.path));
+  const scratch = path.join(context.globalStorageUri.fsPath, "proposed");
+  fs.mkdirSync(scratch, { recursive: true });
+  const proposed = path.join(scratch, path.basename(preview.path));
+  const before = fs.existsSync(original.fsPath) ? fs.readFileSync(original.fsPath, "utf8") : "";
+  fs.writeFileSync(proposed, applyUnifiedDiff(before, preview.diff), "utf8");
+  await vscode.commands.executeCommand(
+    "vscode.diff",
+    original,
+    vscode.Uri.file(proposed),
+    `ChipEvolve · ${preview.path} (proposed)`,
+    { preview: true },
+  );
+}
 
-  const reconnect = () => {
-    if (closed) return;
-    clearTimeout(timer);
-    timer = setTimeout(connect, 2000);
-  };
+/** Reconstruct the proposed file from the unified diff the backend previewed. */
+function applyUnifiedDiff(before, diff) {
+  const lines = String(diff || "").split("\n");
+  const source = before.split("\n");
+  const out = [];
+  let cursor = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/.exec(line);
+    if (!hunk) continue;
+    const start = Number(hunk[1]) - 1;
+    while (cursor < start) out.push(source[cursor++]);
+    for (index += 1; index < lines.length && !lines[index].startsWith("@@"); index += 1) {
+      const body = lines[index];
+      if (body.startsWith("+")) out.push(body.slice(1));
+      else if (body.startsWith("-")) cursor += 1;
+      else if (body.startsWith(" ")) out.push(source[cursor++]);
+    }
+    index -= 1;
+  }
+  while (cursor < source.length) out.push(source[cursor++]);
+  return out.join("\n");
+}
 
-  const connect = () => {
-    if (closed) return;
-    const target = new URL(`${configuration().backendUrl}/api/events`);
-    request = http.get(target, { headers: { accept: "text/event-stream" } }, (response) => {
-      response.setEncoding("utf8");
-      let buffer = "";
-      response.on("data", (chunk) => {
-        buffer += chunk;
-        let boundary;
-        while ((boundary = buffer.indexOf("\n\n")) >= 0) {
-          const block = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
-          const data = block.split("\n").find((line) => line.startsWith("data: "));
-          if (!data) continue;
-          try {
-            const event = JSON.parse(data.slice(6));
-            webview.postMessage({ type: "event", event });
-            if (event.type === "chat.started" && event.payload?.workspace_path) {
-              taskWorkspace = event.payload.workspace_path;
-            }
-            if (["generation.decision", "chat.done", "baseline.completed", "baseline.failed"].includes(event.type)) {
-              postSnapshot(webview);
-            }
-          } catch { /* Ignore malformed SSE frames. */ }
+async function askApproval(context, payload) {
+  const preview = payload.preview || {};
+  const target = preview.path || (payload.input && payload.input.path) || payload.name;
+  const churn = preview.added != null ? ` (+${preview.added} −${preview.removed})` : "";
+  const detail = `ChipEvolve wants to edit ${target}${churn}`;
+
+  const choice = await vscode.window.showInformationMessage(detail, "Approve", "Show diff", "Reject");
+  if (choice === "Show diff") {
+    await showPendingDiff(context, preview);
+    const second = await vscode.window.showInformationMessage(detail, "Approve", "Reject");
+    return second === "Approve";
+  }
+  return choice === "Approve";
+}
+
+// -------------------------------------------------------------- event handling
+
+async function onEvent(context, event) {
+  const payload = event.payload || {};
+  if (task && event.seq) {
+    if (task.seen.has(event.seq)) return;
+    task.seen.add(event.seq);
+  }
+
+  switch (event.type) {
+    case "chat.started":
+      if (task) {
+        task.workspacePath = payload.workspace_path || null;
+        task.detached = Boolean(task.workspacePath) && path.resolve(task.workspacePath) !== path.resolve(projectRoot(context));
+      }
+      output.appendLine(`\n── ${MODE_LABEL[payload.mode] || payload.mode} · ${payload.workspace} ──`);
+      break;
+
+    case "chat.text":
+      output.append(payload.text);
+      break;
+
+    case "chat.tool_start":
+      output.appendLine(`\n  → ${payload.name} ${compactArgs(payload.input)}`);
+      setStatus(payload.name.replace(/_/g, " "), true);
+      task?.progress?.report({ message: payload.name.replace(/_/g, " ") });
+      break;
+
+    case "chat.approval_required": {
+      setStatus("waiting for approval");
+      const approved = await askApproval(context, payload);
+      try {
+        await requestJson("POST", `${configuration().backendUrl}/api/agent/approve`, {
+          tool_use_id: payload.tool_use_id,
+          approved,
+        });
+      } catch (error) {
+        output.appendLine(`  ! approval failed: ${error.message}`);
+      }
+      break;
+    }
+
+    case "chat.tool_result":
+      output.appendLine(`    ${payload.ok ? "✓" : "✗"} ${payload.summary || ""}`);
+      // A file the agent just wrote into the working tree should appear straight
+      // away, the way it would if you had typed it yourself.
+      if (payload.ok && payload.meta && payload.meta.path && !task?.detached) {
+        if (payload.name === "write_file" || payload.name === "replace_in_file") {
+          task && task.touched.add(payload.meta.path);
+          openFile(context, payload.meta.path).catch(() => { /* editor may be busy */ });
         }
-      });
-      response.on("end", reconnect);
-    });
-    request.on("error", reconnect);
-  };
+      }
+      if (payload.name === "report_findings" && payload.meta && payload.meta.findings) {
+        const files = publishFindings(context, payload.meta.findings);
+        task && (task.findings = payload.meta.findings.length);
+        output.appendLine(`    ${payload.meta.findings.length} findings across ${files} file(s) → Problems panel`);
+      }
+      if (payload.name === "score_candidate" && payload.meta) {
+        task && (task.verdict = payload.meta);
+      }
+      break;
 
-  connect();
-  return {
-    destroy() {
-      closed = true;
-      clearTimeout(timer);
-      request?.destroy();
-    },
-  };
+    case "chat.integrity_violation":
+      output.appendLine(`  ⚠ BLOCKED: ${event.message}`);
+      vscode.window.showWarningMessage(`ChipEvolve blocked a protected-path edit: ${event.message}`);
+      break;
+
+    case "chat.usage":
+      task && (task.usage = payload);
+      break;
+
+    case "chat.error":
+      output.appendLine(`\n  ! ${event.message}`);
+      vscode.window.showErrorMessage(`ChipEvolve: ${event.message}`);
+      break;
+
+    case "chat.done":
+      await finishTask(context, payload);
+      break;
+
+    default:
+      break;
+  }
 }
 
-async function openRtl(context, relative = "rtl/alu.sv", line = 0) {
+function compactArgs(input) {
+  if (!input) return "";
+  const text = JSON.stringify(input);
+  return text.length > 120 ? `${text.slice(0, 117)}…` : text;
+}
+
+async function finishTask(context, payload) {
+  const finished = task;
+  task = null;
+  setStatus("idle");
+  finished?.resolve?.();
+  if (!finished) return;
+
+  const cost = finished.usage ? ` · $${(finished.usage.cost_usd || 0).toFixed(3)}` : "";
+
+  if (payload.reason === "cancelled") {
+    vscode.window.showInformationMessage("ChipEvolve task cancelled.");
+    return;
+  }
+  if (finished.mode === "review") {
+    const count = finished.findings || 0;
+    const action = count
+      ? await vscode.window.showInformationMessage(
+          `ChipEvolve review: ${count} finding(s)${cost}`, "Show Problems", "Show log")
+      : await vscode.window.showInformationMessage(`ChipEvolve review: no findings${cost}`, "Show log");
+    if (action === "Show Problems") vscode.commands.executeCommand("workbench.actions.view.problems");
+    if (action === "Show log") output.show(true);
+    return;
+  }
+
+  const edited = payload.edited || [];
+  if (payload.detached && edited.length) {
+    const verdict = finished.verdict;
+    const headline = verdict
+      ? `${verdict.accepted ? "ACCEPTED" : "REJECTED"} ${
+          verdict.fitness && verdict.fitness.improvement_percent != null
+            ? `${verdict.fitness.improvement_percent > 0 ? "+" : ""}${verdict.fitness.improvement_percent.toFixed(2)}%`
+            : ""
+        }`
+      : "Candidate ready";
+    const action = await vscode.window.showInformationMessage(
+      `ChipEvolve · ${headline}${cost} — ${edited.join(", ")}`,
+      "Apply to project",
+      "Show diff",
+      "Discard",
+    );
+    if (action === "Show diff") {
+      await openCandidateDiff(context, finished.workspacePath, edited[0]);
+      const second = await vscode.window.showInformationMessage(
+        `Apply ${edited.join(", ")} to the project?`, "Apply to project", "Discard");
+      if (second !== "Apply to project") return;
+    } else if (action !== "Apply to project") {
+      return;
+    }
+    await applyEdits(context);
+    return;
+  }
+
+  if (edited.length) {
+    vscode.window.showInformationMessage(`ChipEvolve updated ${edited.join(", ")}${cost}`);
+    await openFile(context, edited[0]);
+  } else {
+    const action = await vscode.window.showInformationMessage(`ChipEvolve finished${cost}`, "Show log");
+    if (action === "Show log") output.show(true);
+  }
+}
+
+async function openCandidateDiff(context, workspacePath, relative) {
+  if (!workspacePath || !relative) return;
+  const baseline = vscode.Uri.file(path.join(projectRoot(context), relative));
+  const candidate = vscode.Uri.file(path.join(workspacePath, relative));
+  if (!fs.existsSync(candidate.fsPath)) return;
+  await vscode.commands.executeCommand("vscode.diff", baseline, candidate, `ChipEvolve · ${relative} (candidate)`);
+}
+
+async function openFile(context, relative, line = 0) {
   const uri = vscode.Uri.file(path.join(projectRoot(context), relative));
+  if (!fs.existsSync(uri.fsPath)) return;
   const editor = await vscode.window.showTextDocument(uri, { preview: false });
   if (line > 0) {
     const position = new vscode.Position(Math.max(0, line - 1), 0);
@@ -196,113 +497,178 @@ async function openRtl(context, relative = "rtl/alu.sv", line = 0) {
   }
 }
 
-/** Diff the project baseline against the file the agent is editing right now. */
-async function openTaskDiff(context, relative) {
-  const baseline = vscode.Uri.file(path.join(projectRoot(context), relative));
-  const workspace = taskWorkspace || projectRoot(context);
-  const candidate = vscode.Uri.file(path.join(workspace, relative));
-  if (workspace === projectRoot(context) || !fs.existsSync(candidate.fsPath)) {
-    await openRtl(context, relative);
-    return;
+async function applyEdits(context) {
+  try {
+    const result = await requestJson("POST", `${configuration().backendUrl}/api/agent/apply`, undefined, 30000);
+    const applied = result.applied || [];
+    if (!applied.length) {
+      vscode.window.showInformationMessage("ChipEvolve had no edits to apply.");
+      return;
+    }
+    vscode.window.showInformationMessage(`ChipEvolve applied ${applied.join(", ")}`);
+    await openFile(context, applied[0]);
+  } catch (error) {
+    vscode.window.showErrorMessage(`ChipEvolve could not apply the edits: ${error.message}`);
   }
-  await vscode.commands.executeCommand("vscode.diff", baseline, candidate, `ChipEvolve · ${relative} (proposed)`);
 }
 
-async function openGenerationDiff(context, generation, relative = "rtl/alu.sv") {
-  const baseline = vscode.Uri.file(path.join(projectRoot(context), relative));
-  const candidate = vscode.Uri.file(path.join(projectRoot(context), ".chipevolve", "generations", `gen-${String(generation).padStart(3, "0")}`, relative));
-  if (!fs.existsSync(candidate.fsPath)) {
-    vscode.window.showWarningMessage(`Generation ${generation} workspace is not available.`);
-    return;
-  }
-  await vscode.commands.executeCommand("vscode.diff", baseline, candidate, `ChipEvolve · Baseline ↔ Gen ${String(generation).padStart(2, "0")}`);
-}
+// --------------------------------------------------------------- event stream
 
-function bindMessages(webview, context) {
-  return webview.onDidReceiveMessage(async (message) => {
-    const base = configuration().backendUrl;
-    if (message.command === "ready" || message.command === "refresh") postSnapshot(webview);
-    if (message.command === "openDashboard") vscode.commands.executeCommand("chipevolve.openDashboard");
-    if (message.command === "openFile") await openRtl(context, message.path, message.line || 0);
-    if (message.command === "openDiff") await openTaskDiff(context, message.path);
-    if (message.command === "openGenerationDiff") await openGenerationDiff(context, message.generation, message.path);
-    if (message.command === "startBackend") {
-      await startBackend(context);
-      postSnapshot(webview);
-      attachEventStream(webview);
-    }
-    if (message.command === "baseline") vscode.commands.executeCommand("chipevolve.establishBaseline");
-    if (message.command === "evolve") vscode.commands.executeCommand("chipevolve.evolve");
+function attachEventStream(context) {
+  let request;
+  let timer;
+  let closed = false;
+  let epoch = 0;
 
-    if (message.command === "startTask") {
-      if (!(await startBackend(context))) {
-        webview.postMessage({ type: "taskFailed", message: "The backend is not running." });
-        return;
-      }
-      try {
-        const result = await requestJson("POST", `${base}/api/agent/task`, {
-          mode: message.mode,
-          message: message.message,
-          model: configuration().model,
-          auto_approve: message.autoApprove || [],
-        });
-        taskWorkspace = result.workspace_path || null;
-        webview.postMessage({ type: "taskStarted", workspace: result.workspace });
-      } catch (error) {
-        webview.postMessage({ type: "taskFailed", message: error.message });
-      }
-    }
-    if (message.command === "approve") {
-      try {
-        await requestJson("POST", `${base}/api/agent/approve`, {
-          tool_use_id: message.toolUseId,
-          approved: Boolean(message.approved),
-        });
-      } catch (error) {
-        webview.postMessage({ type: "taskFailed", message: error.message });
-      }
-    }
-    if (message.command === "applyEdits") {
-      try {
-        const result = await requestJson("POST", `${base}/api/agent/apply`);
-        const applied = result.applied || [];
-        webview.postMessage({ type: "applied", files: applied });
-        vscode.window.showInformationMessage(
-          applied.length
-            ? `ChipEvolve applied ${applied.length} file(s) to the project: ${applied.join(", ")}`
-            : "ChipEvolve had no edits to apply.",
-        );
-        if (applied.length) await openRtl(context, applied[0]);
-      } catch (error) {
-        webview.postMessage({ type: "taskFailed", message: error.message });
-      }
-    }
-    if (message.command === "cancel") {
-      try {
-        await requestJson("POST", `${base}/api/agent/cancel`);
-      } catch { /* the task may already have finished. */ }
-    }
-  });
-}
+  const reconnect = (mine) => {
+    if (closed || mine !== epoch) return;
+    epoch += 1;
+    request?.destroy();
+    request = undefined;
+    clearTimeout(timer);
+    timer = setTimeout(connect, 2000);
+  };
 
-class ChatViewProvider {
-  constructor(context) { this.context = context; }
-  resolveWebviewView(view) {
-    chatView = view;
-    view.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.file(path.join(this.context.extensionPath, "apps", "extension", "media"))],
-    };
-    view.webview.html = webviewHtml(view.webview, this.context, "chat", "sidebar");
-    bindMessages(view.webview, this.context);
-    postSnapshot(view.webview);
-    chatStream = attachEventStream(view.webview);
-    view.onDidDispose(() => {
-      chatStream?.destroy();
-      chatStream = undefined;
-      chatView = undefined;
+  const connect = () => {
+    if (closed) return;
+    const mine = epoch;
+    request?.destroy();
+    const target = new URL(`${configuration().backendUrl}/api/events`);
+    request = http.get(target, { headers: { accept: "text/event-stream" } }, (response) => {
+      response.setEncoding("utf8");
+      let buffer = "";
+      response.on("data", (chunk) => {
+        if (closed || mine !== epoch) return;
+        buffer += chunk;
+        let boundary;
+        while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+          const block = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const data = block.split("\n").find((line) => line.startsWith("data: "));
+          if (!data) continue;
+          try {
+            onEvent(context, JSON.parse(data.slice(6)));
+          } catch { /* ignore malformed SSE frames */ }
+        }
+      });
+      response.on("end", () => reconnect(mine));
     });
+    request.on("error", () => reconnect(mine));
+  };
+
+  connect();
+  return { destroy() { closed = true; epoch += 1; clearTimeout(timer); request?.destroy(); } };
+}
+
+// ------------------------------------------------------------------- commands
+
+async function runMode(context, mode) {
+  if (task) {
+    const action = await vscode.window.showWarningMessage(
+      "A ChipEvolve task is already running.", "Cancel it", "Keep waiting");
+    if (action === "Cancel it") await cancelTask();
+    return;
   }
+  if (!(await startBackend(context))) return;
+  try {
+    await ensureProject(context);
+  } catch (error) {
+    vscode.window.showErrorMessage(`ChipEvolve could not open the project: ${error.message}`);
+    return;
+  }
+
+  const view = editorContext(context);
+  if (mode !== "generate" && !view.focus) {
+    const proceed = await vscode.window.showWarningMessage(
+      "No Verilog file from the ChipEvolve project is active. Continue against the whole project?",
+      "Continue", "Cancel");
+    if (proceed !== "Continue") return;
+  }
+
+  const placeholder = {
+    generate: "Describe the module to write — ports, behaviour, timing",
+    review: view.focus ? `What should the review of ${view.focus} focus on?` : "What should the review focus on?",
+    optimize: view.focus ? `What should this generation improve in ${view.focus}?` : "What should this generation improve?",
+  }[mode];
+
+  const message = await vscode.window.showInputBox({
+    title: `ChipEvolve · ${MODE_LABEL[mode]} RTL`,
+    prompt: view.focus ? `Context: ${view.focus}` : "Context: whole project",
+    placeHolder: placeholder,
+    ignoreFocusOut: true,
+  });
+  if (!message || !message.trim()) return;
+
+  diagnostics.clear();
+  output.clear();
+  output.show(true);
+
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `ChipEvolve · ${MODE_LABEL[mode]}`,
+      cancellable: true,
+    },
+    (progress, token) =>
+      new Promise(async (resolve) => {
+        task = {
+          mode,
+          seen: new Set(),
+          progress,
+          resolve,
+          usage: null,
+          findings: 0,
+          verdict: null,
+          workspacePath: null,
+          detached: false,
+          touched: new Set(),
+        };
+        token.onCancellationRequested(() => cancelTask());
+        setStatus(`${MODE_LABEL[mode].toLowerCase()}…`, true);
+        try {
+          await requestJson("POST", `${configuration().backendUrl}/api/agent/task`, {
+            mode,
+            message,
+            model: configuration().model,
+            auto_approve: configuration().autoApprove,
+            focus_path: view.focus,
+            open_files: view.open,
+            selection: view.selection,
+          });
+        } catch (error) {
+          task = null;
+          setStatus("idle");
+          vscode.window.showErrorMessage(`ChipEvolve: ${error.message}`);
+          resolve();
+        }
+      }),
+  );
+}
+
+async function cancelTask() {
+  try {
+    await requestJson("POST", `${configuration().backendUrl}/api/agent/cancel`);
+  } catch { /* the task may already have finished */ }
+}
+
+// ------------------------------------------------------------------ dashboard
+
+function dashboardHtml(webview, context) {
+  const media = vscode.Uri.joinPath(context.extensionUri, "apps", "extension", "media");
+  const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(media, "dashboard.css"));
+  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(media, "dashboard.js"));
+  const nonce = Math.random().toString(36).slice(2);
+  return `<!doctype html>
+  <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+  <link rel="stylesheet" href="${styleUri}"><title>ChipEvolve</title></head>
+  <body data-mode="dashboard"><div id="app"></div><script nonce="${nonce}" src="${scriptUri}"></script></body></html>`;
+}
+
+function postSnapshot(webview) {
+  requestJson("GET", `${configuration().backendUrl}/api/project`)
+    .then((snapshot) => webview.postMessage({ type: "snapshot", snapshot }))
+    .catch((error) => webview.postMessage({ type: "offline", message: error.message }));
 }
 
 function openDashboard(context) {
@@ -311,62 +677,94 @@ function openDashboard(context) {
     postSnapshot(dashboardPanel.webview);
     return;
   }
-  dashboardPanel = vscode.window.createWebviewPanel("chipevolve.dashboard", "ChipEvolve · Evolution", vscode.ViewColumn.One, {
-    enableScripts: true,
-    retainContextWhenHidden: true,
-    localResourceRoots: [vscode.Uri.file(path.join(context.extensionPath, "apps", "extension", "media"))],
+  dashboardPanel = vscode.window.createWebviewPanel(
+    "chipevolve.dashboard",
+    "ChipEvolve · Evolution",
+    vscode.ViewColumn.One,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.file(path.join(context.extensionPath, "apps", "extension", "media"))],
+    },
+  );
+  dashboardPanel.webview.html = dashboardHtml(dashboardPanel.webview, context);
+  dashboardPanel.webview.onDidReceiveMessage(async (message) => {
+    if (message.command === "refresh" || message.command === "ready") postSnapshot(dashboardPanel.webview);
+    if (message.command === "openFile") await openFile(context, message.path);
+    if (message.command === "evolve") vscode.commands.executeCommand("chipevolve.optimizeRtl");
+    if (message.command === "baseline") vscode.commands.executeCommand("chipevolve.establishBaseline");
   });
-  dashboardPanel.iconPath = vscode.Uri.file(path.join(context.extensionPath, "apps", "extension", "media", "chip.svg"));
-  dashboardPanel.webview.html = webviewHtml(dashboardPanel.webview, context);
-  bindMessages(dashboardPanel.webview, context);
-  const stream = attachEventStream(dashboardPanel.webview);
   postSnapshot(dashboardPanel.webview);
-  dashboardPanel.onDidDispose(() => { stream?.destroy(); dashboardPanel = undefined; });
+  dashboardPanel.onDidDispose(() => { dashboardPanel = undefined; });
 }
 
+// ------------------------------------------------------------------- activate
+
 async function activate(context) {
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("chipevolve.chat", new ChatViewProvider(context), {
-      webviewOptions: { retainContextWhenHidden: true },
-    }),
-  );
-  context.subscriptions.push(vscode.commands.registerCommand("chipevolve.openDashboard", () => openDashboard(context)));
-  context.subscriptions.push(
-    vscode.commands.registerCommand("chipevolve.newTask", async () => {
-      await vscode.commands.executeCommand("chipevolve.chat.focus");
-      chatView?.webview.postMessage({ type: "newTask" });
-    }),
-  );
-  for (const mode of ["generate", "review", "optimize"]) {
-    const command = `chipevolve.${mode}Rtl`;
-    context.subscriptions.push(
-      vscode.commands.registerCommand(command, async () => {
-        await startBackend(context, false);
-        await vscode.commands.executeCommand("chipevolve.chat.focus");
-        chatView?.webview.postMessage({ type: "setMode", mode });
-      }),
+  output = vscode.window.createOutputChannel("ChipEvolve");
+  diagnostics = vscode.languages.createDiagnosticCollection("chipevolve");
+  statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusItem.command = "chipevolve.showActions";
+  setStatus("idle");
+  context.subscriptions.push(output, diagnostics, statusItem);
+
+  stream = attachEventStream(context);
+  context.subscriptions.push({ dispose: () => stream?.destroy() });
+
+  const register = (name, handler) =>
+    context.subscriptions.push(vscode.commands.registerCommand(name, handler));
+
+  register("chipevolve.generateRtl", () => runMode(context, "generate"));
+  register("chipevolve.reviewRtl", () => runMode(context, "review"));
+  register("chipevolve.optimizeRtl", () => runMode(context, "optimize"));
+  register("chipevolve.cancelTask", () => cancelTask());
+  register("chipevolve.applyEdits", () => applyEdits(context));
+  register("chipevolve.showLog", () => output.show(true));
+  register("chipevolve.clearFindings", () => diagnostics.clear());
+  register("chipevolve.openDashboard", () => openDashboard(context));
+  register("chipevolve.startBackend", () => startBackend(context));
+
+  register("chipevolve.establishBaseline", async () => {
+    if (!(await startBackend(context))) return;
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "ChipEvolve · measuring baseline…" },
+      async () => {
+        const result = await requestJson(
+          "POST", `${configuration().backendUrl}/api/baseline?force=true`, undefined, 900000);
+        const cells = result.metrics && result.metrics.cell_count;
+        vscode.window.showInformationMessage(
+          cells != null
+            ? `ChipEvolve baseline: ${cells} cells`
+            : "ChipEvolve could not measure a baseline — see the log.",
+        );
+        if (cells == null) output.show(true);
+      },
     );
-  }
-  context.subscriptions.push(vscode.commands.registerCommand("chipevolve.startBackend", () => startBackend(context)));
-  context.subscriptions.push(vscode.commands.registerCommand("chipevolve.openDemoProject", () => openRtl(context)));
-  context.subscriptions.push(vscode.commands.registerCommand("chipevolve.establishBaseline", async () => {
-    if (!await startBackend(context)) return;
-    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "ChipEvolve · Establishing real EDA baseline…" }, async () => {
-      await requestJson("POST", `${configuration().backendUrl}/api/baseline`);
-    });
-    vscode.window.showInformationMessage("ChipEvolve baseline complete. Open the dashboard to inspect measured metrics.");
-    if (dashboardPanel) postSnapshot(dashboardPanel.webview);
-  }));
-  context.subscriptions.push(vscode.commands.registerCommand("chipevolve.evolve", async () => {
-    if (!await startBackend(context)) return;
-    openDashboard(context);
-    await requestJson("POST", `${configuration().backendUrl}/api/evolve`);
-    vscode.window.showInformationMessage("ChipEvolve started a focused RTL generation.");
-  }));
+  });
+
+  register("chipevolve.showActions", async () => {
+    const items = task
+      ? [{ label: "$(stop) Cancel running task", command: "chipevolve.cancelTask" },
+         { label: "$(output) Show log", command: "chipevolve.showLog" }]
+      : [
+          { label: "$(sparkle) Generate RTL", command: "chipevolve.generateRtl" },
+          { label: "$(checklist) Review RTL", command: "chipevolve.reviewRtl" },
+          { label: "$(rocket) Optimize RTL", command: "chipevolve.optimizeRtl" },
+          { label: "$(dashboard) Measure baseline", command: "chipevolve.establishBaseline" },
+          { label: "$(pulse) Open dashboard", command: "chipevolve.openDashboard" },
+          { label: "$(output) Show log", command: "chipevolve.showLog" },
+          { label: "$(clear-all) Clear findings", command: "chipevolve.clearFindings" },
+        ];
+    const picked = await vscode.window.showQuickPick(items, { title: "ChipEvolve" });
+    if (picked) vscode.commands.executeCommand(picked.command);
+  });
+
+  startBackend(context, false).catch(() => { /* surfaced on first use */ });
 }
 
 function deactivate() {
+  stream?.destroy();
   if (backendProcess && backendProcess.exitCode === null) backendProcess.kill();
 }
 
-module.exports = { activate, deactivate, toWslPath };
+module.exports = { activate, deactivate, toWslPath, applyUnifiedDiff, isRtlDocument };

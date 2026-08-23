@@ -10,6 +10,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from chipevolve.agents import prompts as agent_prompts
 from chipevolve.agents import tools as agent_tools
 from chipevolve.agents.session import DEFAULT_MODEL, SessionManager
 from chipevolve.domain.models import ProjectSnapshot
@@ -48,9 +49,52 @@ app.add_middleware(
 )
 
 
+def _activate(root: Path) -> None:
+    """Point the whole backend at a different project directory."""
+    global config, state_root, repository, runner, toolchain, evolution, sessions
+    config = load_project_config(root)
+    state_root = root / ".chipevolve"
+    repository = Repository(state_root / "chipevolve.sqlite3")
+    runner = CommandRunner(state_root / "logs", distro=os.environ.get("CHIPEVOLVE_WSL_DISTRO", "Ubuntu"))
+    toolchain = Toolchain(runner)
+    evolution = EvolutionService(config, repository, toolchain, events)
+    sessions = SessionManager(config, repository, toolchain, events)
+
+
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "project": config.name, "tools": await toolchain.status()}
+    return {
+        "status": "ok",
+        "project": config.name,
+        "root": str(config.root),
+        "tools": await toolchain.status(),
+    }
+
+
+@app.post("/api/project/open")
+async def open_project(payload: dict = Body(...)) -> dict:
+    raw = (payload.get("root") or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="A project root is required.")
+    root = Path(raw).expanduser()
+    if not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"{root} is not a directory.")
+    root = root.resolve()
+    if root == config.root:
+        return {"root": str(root), "project": config.name, "changed": False}
+    if sessions.busy or evolution_lock.locked():
+        raise HTTPException(status_code=409, detail="Finish or cancel the running task before switching projects.")
+    try:
+        _activate(root)
+    except (KeyError, ValueError, OSError) as error:
+        raise HTTPException(status_code=400, detail=f"Could not open {root}: {error}") from error
+    return {
+        "root": str(config.root),
+        "project": config.name,
+        "changed": True,
+        "rtl": config.rtl,
+        "top": config.top,
+    }
 
 
 @app.get("/api/project", response_model=ProjectSnapshot)
@@ -111,12 +155,19 @@ async def start_task(payload: dict = Body(...)) -> dict:
     message = (payload.get("message") or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="A task description is required.")
+    selection = payload.get("selection")
+    note = agent_prompts.editor_context(
+        payload.get("focus_path"),
+        list(payload.get("open_files") or []),
+        (int(selection[0]), int(selection[1])) if selection else None,
+    )
     try:
         session = await sessions.start(
             mode=mode,
             message=message,
             model=payload.get("model") or DEFAULT_MODEL,
             auto_approve=payload.get("auto_approve") or [],
+            editor_note=note,
         )
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error

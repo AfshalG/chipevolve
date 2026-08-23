@@ -28,6 +28,7 @@ def load_project_config(root: Path) -> ProjectConfig:
         clock_period_ns=float(clock.get("period_ns", 10.0)),
         objective=optimization.get("objective", "balanced"),
         max_generations=int(optimization.get("max_generations", 5)),
+        mutable=list(raw.get("mutable", ["rtl/**"])),
         protected=list(raw.get("protected", ["tb/**", "constraints/**", "scripts/evaluation/**", "golden/**"])),
     )
 

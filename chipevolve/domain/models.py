@@ -128,6 +128,9 @@ class FitnessResult(BaseModel):
 
 
 class Generation(BaseModel):
+    # "codex" or "offline" — surfaced in the UI so a canned run is never
+    # mistaken for a real one.
+    agent: str = "codex"
     id: str
     generation_number: int
     parent_id: str | None = None
@@ -171,6 +174,9 @@ class ProjectConfig(BaseModel):
     clock_period_ns: float = 10.0
     objective: Literal["balanced", "performance", "low_power", "compact"] = "balanced"
     max_generations: int = Field(default=5, ge=1, le=50)
+    # Paths Codex is permitted to edit. Enforced in agent/codex.py before any
+    # patch is trusted, independently of the CLI sandbox.
+    mutable: list[str] = Field(default_factory=lambda: ["rtl/**"])
     protected: list[str] = Field(default_factory=lambda: ["tb/**", "constraints/**", "scripts/evaluation/**", "golden/**"])
 
 

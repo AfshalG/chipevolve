@@ -64,3 +64,27 @@ the baseline fails its own lint gate at generation 0.
 
 If Codex fixes those, the warnings disappear on their own. Consider surfacing
 them to the agent as hints rather than as gate failures.
+
+---
+
+## Codex integration notes (learned the hard way, 2026-08-23)
+
+Four things that will cost you an hour each if you rediscover them:
+
+1. **`--ignore-user-config` is required.** A broken MCP server in
+   `~/.codex/config.toml` (one returning HTTP 401) kills the exec worker before
+   it starts. Auth still resolves from `CODEX_HOME`, so nothing is lost, and
+   runs stop depending on whose laptop they're on.
+
+2. **`stdin=DEVNULL`.** `codex exec` appends piped stdin to the prompt, so an
+   inherited non-TTY stdin can make it block.
+
+3. **`Reading additional input from stdin...` is benign noise** printed under
+   `--json`. It is *not* the error. Reading the stderr tail shows you only this
+   line while masking the real failure — parse the JSONL stream for
+   `type: "error"` / `turn.failed` instead.
+
+4. **Structured-output schemas require `required` to list every key in
+   `properties`**, at every nesting level. An optional field produces:
+   `invalid_json_schema ... 'required' is required to be supplied and to be an
+   array including every key in properties`.

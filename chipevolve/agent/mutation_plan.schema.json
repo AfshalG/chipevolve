@@ -1,0 +1,96 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "target_module",
+    "mutation_type",
+    "hypothesis",
+    "expected_effects",
+    "risk",
+    "memory_used",
+    "files_to_modify"
+  ],
+  "properties": {
+    "target_module": {
+      "type": "string"
+    },
+    "mutation_type": {
+      "type": "string",
+      "enum": [
+        "mux_restructure",
+        "bitwidth_reduction",
+        "arithmetic_simplification",
+        "redundant_logic_elimination",
+        "resource_sharing",
+        "operand_isolation",
+        "fsm_encoding",
+        "comparator_restructure",
+        "constant_propagation",
+        "enable_logic_simplification"
+      ]
+    },
+    "hypothesis": {
+      "type": "string"
+    },
+    "expected_effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "area",
+        "performance",
+        "power",
+        "congestion"
+      ],
+      "properties": {
+        "area": {
+          "type": "string",
+          "enum": [
+            "improve",
+            "neutral",
+            "regress"
+          ]
+        },
+        "performance": {
+          "type": "string",
+          "enum": [
+            "improve",
+            "neutral",
+            "regress"
+          ]
+        },
+        "power": {
+          "type": "string",
+          "enum": [
+            "improve",
+            "neutral",
+            "regress"
+          ]
+        },
+        "congestion": {
+          "type": "string",
+          "enum": [
+            "improve",
+            "neutral",
+            "regress"
+          ]
+        }
+      }
+    },
+    "risk": {
+      "type": "string"
+    },
+    "memory_used": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_to_modify": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    }
+  }
+}

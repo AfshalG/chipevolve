@@ -12,11 +12,13 @@ from chipevolve.services.evolution import EvolutionService
 from chipevolve.storage.repository import Repository
 
 
-async def run(command: str, root: Path) -> int:
+async def run(command: str, root: Path, offline: bool = False) -> int:
     config = load_project_config(root)
     state = root / ".chipevolve"
     repository = Repository(state / "chipevolve.sqlite3")
-    service = EvolutionService(config, repository, Toolchain(CommandRunner(state / "logs")), EventBus())
+    service = EvolutionService(config, repository, Toolchain(CommandRunner(state / "logs")), EventBus(), offline=offline)
+    if command == "evolve":
+        print(f"[chipevolve] mutation agent: {'OFFLINE (canned)' if service.offline else 'codex'}")
     if command == "analyze":
         metrics, verification = await service.establish_baseline(force=True)
         print(metrics.model_dump_json(indent=2) if metrics else verification.model_dump_json(indent=2))
@@ -36,8 +38,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="chipevolve")
     parser.add_argument("command", choices=["analyze", "evolve", "status"])
     parser.add_argument("project", nargs="?", default=".")
+    parser.add_argument("--offline", action="store_true",
+                        help="Use the canned mutation instead of Codex. Demo fallback only.")
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(run(args.command, Path(args.project).resolve())))
+    raise SystemExit(asyncio.run(run(args.command, Path(args.project).resolve(), args.offline)))
 
 
 if __name__ == "__main__":

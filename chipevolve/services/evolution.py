@@ -20,6 +20,7 @@ from chipevolve.memory.local import EngineeringMemory
 from chipevolve.scoring.fitness import calculate_fitness
 from chipevolve.services.events import EventBus
 from chipevolve.services.integrity import integrity_matches, protected_hashes
+from chipevolve.agent.codex import CodexMutator, CodexUnavailable, codex_available
 from chipevolve.services.mutation import apply_mux_restructure, plan_mux_restructure
 from chipevolve.services.workspace import WorkspaceManager
 from chipevolve.storage.repository import Repository
@@ -32,6 +33,7 @@ class EvolutionService:
         repository: Repository,
         toolchain: Toolchain,
         events: EventBus,
+        offline: bool = False,
     ) -> None:
         self.project = project
         self.repository = repository
@@ -39,6 +41,10 @@ class EvolutionService:
         self.events = events
         self.workspaces = WorkspaceManager(project.root)
         self.memory = EngineeringMemory(repository)
+        # offline=True uses the canned mutation in services/mutation.py. It is a
+        # demo-safety fallback only: the UI must show that Codex did not run.
+        self.offline = offline or not codex_available()
+        self.mutator = CodexMutator()
 
     async def _emit(self, type_: str, generation: int | None = None, stage: GenerationStage | None = None, message: str | None = None, **payload: object) -> None:
         await self.events.publish(EvolutionEvent(type=type_, generation=generation, stage=stage, message=message, payload=payload))
@@ -107,27 +113,53 @@ class EvolutionService:
         generation.memory_refs = recalls
         await self._emit("generation.memory", number, message=f"Recalled {len(recalls)} related experiments", memories=[item.model_dump() for item in recalls])
 
-        await self._stage(generation, GenerationStage.PLANNING_MUTATION, "Planning a localized mux restructure")
-        plan = plan_mux_restructure([item.generation_id for item in recalls])
-        generation.hypothesis = plan.hypothesis
-        generation.mutation_type = plan.mutation_type
-        generation.rationale = f"Expected area effect: {plan.expected_effects['area']}. Risk: {plan.risk}"
-        self.repository.save_generation(generation)
-
         workspace = self.workspaces.create(number)
         protected_before = protected_hashes(workspace, self.project.protected)
-        await self._stage(generation, GenerationStage.EDITING, "Applying focused RTL mutation")
+
+        rtl_relative = self.project.rtl[0]
+        original = (workspace / rtl_relative).read_text(encoding="utf-8")
+
+        await self._stage(
+            generation,
+            GenerationStage.PLANNING_MUTATION,
+            "Offline mode: applying canned mutation" if self.offline else "Codex is proposing a mutation",
+        )
+
         try:
-            original = (workspace / plan.files_to_modify[0]).read_text(encoding="utf-8")
-            mutation = apply_mux_restructure(workspace, plan)
-            modified = (workspace / plan.files_to_modify[0]).read_text(encoding="utf-8")
-            generation.files_changed = mutation.changed_files
-            generation.diff = "".join(difflib.unified_diff(original.splitlines(True), modified.splitlines(True), fromfile="baseline/rtl/alu.sv", tofile=f"gen-{number:03d}/rtl/alu.sv"))
-        except ValueError as error:
+            if self.offline:
+                plan = plan_mux_restructure([item.generation_id for item in recalls])
+                mutation = apply_mux_restructure(workspace, plan)
+                generation.agent = "offline"
+            else:
+                logs: list[str] = []
+                result = await self.mutator.propose(
+                    workspace=workspace,
+                    project=self.project,
+                    metrics=generation.metrics_before,
+                    recalls=recalls,
+                    on_log=logs.append,
+                )
+                for line in logs:
+                    await self._emit("generation.log", number, message=line)
+                plan = result.plan
+                mutation = result
+                generation.agent = "codex"
+        except (CodexUnavailable, ValueError) as error:
             generation.status = GenerationStatus.FAILED
             generation.decision_reason = str(error)
             await self._stage(generation, GenerationStage.FAILED, str(error))
+            self.repository.save_generation(generation)
             return generation
+
+        generation.hypothesis = plan.hypothesis
+        generation.mutation_type = plan.mutation_type
+        generation.rationale = f"Expected area effect: {plan.expected_effects.get('area', 'unknown')}. Risk: {plan.risk}"
+        self.repository.save_generation(generation)
+
+        await self._stage(generation, GenerationStage.EDITING, f"Applied {plan.mutation_type} to {plan.files_to_modify[0]}")
+        modified = (workspace / rtl_relative).read_text(encoding="utf-8")
+        generation.files_changed = mutation.changed_files
+        generation.diff = "".join(difflib.unified_diff(original.splitlines(True), modified.splitlines(True), fromfile=f"baseline/{rtl_relative}", tofile=f"gen-{number:03d}/{rtl_relative}"))
 
         await self._stage(generation, GenerationStage.REVIEWING, "Local policy review found no protected-path edits")
         integrity_ok = integrity_matches(protected_before, protected_hashes(workspace, self.project.protected))

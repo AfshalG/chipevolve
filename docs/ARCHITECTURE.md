@@ -1,97 +1,100 @@
 # Architecture
 
-Everything runs in the VS Code extension host as TypeScript. **No Python, no
-FastAPI, no WebSocket server.** We shell out to EDA binaries directly. This
-removes an entire process boundary and roughly 90 minutes of plumbing that buys
-the demo nothing.
+> **Updated 2026-08-23 15:45 — this doc previously described a TypeScript-only
+> engine. That is not what was built.** The engine is Python; the VS Code
+> extension is a thin client. `src/types.ts` survives as the wire format.
 
 ```
-┌─ VS Code Extension Host (TypeScript) ────────────────────────┐
+┌─ VS Code extension (JS) ─────────────────────────────────────┐
+│  extension/src/extension.js                                  │
+│    spawns the backend, opens the webview, polls/streams       │
+│    events, renders lineage + metrics                          │
+└───────────────────────┬──────────────────────────────────────┘
+                        │ HTTP — 127.0.0.1:8000
+┌───────────────────────┴──────────────────────────────────────┐
+│  chipevolve/  (Python 3.10+, pydantic v2, FastAPI)           │
 │                                                              │
-│  extension.ts          command registration, webview panel   │
-│         │                                                    │
-│         ▼                                                    │
-│  engine/evolution.ts   the generation loop  ── Lane C        │
-│         │                                                    │
-│         ├── agent/codex.ts      propose mutation (JSON plan) │
-│         ├── engine/workspace.ts isolated gen-N dir + git     │
-│         ├── engine/protect.ts   hash protected files         │
-│         ├── engine/fitness.ts   deterministic scoring        │
-│         ├── memory/*.ts         recall + record              │
-│         │                                                    │
-│         ▼                                                    │
-│  eda/{verilator,yosys,openroad}.ts   ── Lane B               │
-│         │  child_process.spawn, timeouts, log capture        │
-│         ▼                                                    │
-│  eda/parsers/*.ts      stdout ──► Metrics                    │
+│  api/main.py            FastAPI surface                      │
+│  cli.py                 analyze | evolve | status [--offline] │
 │                                                              │
-│  EvolveEvent stream ──► webview (postMessage)  ── Lane D     │
+│  services/evolution.py  the generation loop                  │
+│  services/workspace.py  isolated gen-N dirs                  │
+│  services/integrity.py  SHA-256 protected-file gate          │
+│  services/mutation.py   canned fallback (offline only)       │
+│  agent/codex.py         REAL mutation — `codex exec`          │
+│  eda/providers.py       verilator + yosys                    │
+│  scoring/fitness.py     deterministic scoring                │
+│  memory/local.py        experiment recall                    │
+│  storage/repository.py  SQLite persistence                   │
 └──────────────────────────────────────────────────────────────┘
-                              │
-                    examples/alu/  ── Lane A
+                        │  subprocess
+                 yosys · verilator · codex
 ```
 
-## Generation lifecycle
+## How a mutation is actually proposed
 
-```
-analyzing → recalling_memory → planning_mutation → editing
-  → linting → simulating → synthesizing → [physical_analysis] → scoring
-  → accepted | rejected → done
-```
+`agent/codex.py` shells out to the Codex CLI (verified against 0.149.0):
 
-Every transition emits `generation.stage`. The webview animates off that stream
-and nothing else.
-
-## Workspace isolation
-
-Each candidate runs in its own directory. The source project is never mutated.
-
-```
-.chipevolve/
-  baseline/
-  generations/
-    gen-001/    ← full copy + patch applied
-    gen-002/
-  logs/
-  memory.json
+```bash
+codex exec -C <workspace> -s workspace-write --skip-git-repo-check \
+  --ignore-user-config \
+  --output-schema chipevolve/agent/mutation_plan.schema.json \
+  -o .codex-plan.json --json "<prompt>"
 ```
 
-Git checkpoint per candidate. **Rejected generations are never deleted** — their
-diffs and metrics are the memory corpus.
+- `--output-schema` constrains Codex's final response to `MutationPlan`, so the
+  plan arrives as validated JSON instead of prose we have to scrape.
+- `--ignore-user-config` skips `~/.codex/config.toml`. A broken MCP server there
+  kills the exec worker before it starts, and every teammate's config differs.
+  Auth still resolves from `CODEX_HOME`.
+- `-s workspace-write` confines edits to the generation directory.
 
-## The gate order matters
+The prompt carries the RTL, the current measured metrics, and recalled memory
+lessons ("gen-2 tried shift/add, depth regressed 18%, rejected").
 
-Fitness is computed **only** after every hard gate passes:
+## Three independent defenses against reward hacking
 
-```ts
-if (verification.protectedFilesModified) return REJECT; // reward hacking
-if (!verification.lintPassed)            return REJECT;
-if (!verification.simulationPassed)      return REJECT;
-// only now is it meaningful to compare numbers
-return fitness(candidate) < fitness(best) ? ACCEPT : REJECT;
+Deliberately redundant, because the testbench lives *inside* the sandbox:
+
+1. `-s workspace-write` — Codex cannot reach outside the generation dir.
+2. `agent/codex.py::_validate_paths` — every `files_to_modify` entry is matched
+   against the project's `mutable` globs before the patch is trusted.
+3. `services/integrity.py` — protected files are SHA-256 hashed before and
+   after, and any delta rejects the generation. **This runs regardless of what
+   the sandbox allowed or what Codex claimed.**
+
+## Gate order is the product
+
+```python
+if not verification.hard_gates_passed:   # protected · lint · sim · synth
+    return REJECT
+# only now is comparing numbers meaningful
 ```
 
-A candidate that improves area by 30% and breaks the testbench is rejected
-without the area number ever being considered. This ordering is the product.
+A candidate that improves cell count 30% and breaks the testbench is rejected
+without the cell count ever entering the decision.
 
 ## Fitness
 
-Normalized against baseline, lower is better:
-
-```ts
-cost = 0.55 * (area / baseArea) + 0.45 * (depth / baseDepth)
+```python
+cost = Σ (candidate/baseline) × weight   # lower is better
 ```
 
-Two terms, because area and logic depth are what we can measure honestly from
-Yosys. When OpenROAD data exists, slack and congestion terms are added and the
-UI labels the score as physically-backed.
+Terms are included only when both sides have a real value. Area falls back to
+cell count when no liberty file is configured; **delay falls back to Yosys logic
+depth when there is no fmax**. Without that fallback the delay term drops out
+entirely and fitness collapses to cell count alone — which would make the
+priority-mux restructure (a depth win) score as noise.
 
-## Codex integration
+## Provenance
 
-Codex returns a `MutationPlan` as structured JSON, which is **validated before
-any patch is applied**. An unparseable or out-of-bounds plan fails the
-generation rather than being improvised around.
+`Generation.agent` is `"codex"` or `"offline"`. The `--offline` flag uses the
+canned mutation in `services/mutation.py` as a demo-safety fallback only. **The
+UI must show which one ran** — a canned run must never be mistaken for a real
+one.
 
-`filesToModify` is intersected with the project's mutable RTL set. A plan that
-targets anything outside it is rejected at the tool layer, before Codex's edit
-is ever run.
+## What `src/types.ts` is now
+
+Not a TypeScript engine contract — the wire format between the Python API and
+the extension. Field names there are camelCase; the Python models are
+snake_case. The extension is responsible for the mapping.

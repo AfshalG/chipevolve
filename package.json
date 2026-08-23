@@ -26,9 +26,9 @@
   ],
   "main": "./extension/src/extension.js",
   "scripts": {
-    "check": "node --check apps/extension/src/extension.js && node --check apps/extension/media/chat.js && node --check apps/extension/media/dashboard.js",
-    "test": "npm run check",
-    "package": "vsce package --no-dependencies --out chipevolve.vsix"
+    "check": "node --check extension/src/extension.js && node --check extension/media/chat.js && node --check extension/media/dashboard.js",
+    "test": ".venv/bin/python -m pytest tests/ -q",
+    "package": "npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository -o chipevolve.vsix"
   },
   "contributes": {
     "commands": [
@@ -80,7 +80,7 @@
         {
           "id": "chipevolve",
           "title": "ChipEvolve",
-          "icon": "apps/extension/media/chip.svg"
+          "icon": "extension/media/chip.svg"
         }
       ]
     },

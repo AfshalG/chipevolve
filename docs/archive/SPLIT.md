@@ -4,7 +4,7 @@
 
 ## Before anyone writes code (10 minutes, all four)
 
-Read [`src/types.ts`](../src/types.ts) together. It is the contract between all
+Read [`src/types.ts`](../../src/types.ts) together. It is the contract between all
 four lanes. **Frozen at 13:45** — after that, nobody edits it without saying so
 out loud.
 

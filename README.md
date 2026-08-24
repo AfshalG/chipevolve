@@ -47,6 +47,25 @@ success.
 
 ---
 
+## Three modes
+
+The extension is a chat sidebar. Which tools the agent is handed depends on
+the mode you pick, and that is enforced by the tool list itself — not by asking
+the model nicely.
+
+| Mode | What it does | Safe? |
+|---|---|---|
+| **Review** | Reads your design, reports problems. Has no editing tools at all. | Yes — start here |
+| **Generate** | Writes new Verilog to your description | Edits files |
+| **Optimize** | One full round: recall → change → lint → simulate → measure → score | Works in a copy |
+
+Every edit shows you a diff and waits for you to approve or reject it.
+
+Optimize runs in a generation workspace under `.chipevolve/generations/`. Your
+working tree is untouched until you press **Apply to project**.
+
+---
+
 ## What is actually measured
 
 We do not fabricate numbers. Every metric below is either real, a labeled
@@ -75,9 +94,15 @@ Anything unavailable renders as `N/A`. That is a feature, not a gap.
 An optimization agent will discover it can improve its score by changing the
 benchmark instead of the design. We block that technically, not by prompting.
 
-Protected paths (`tb/**`, `constraints/**`, `scripts/evaluation/**`) are hashed
-before and after every generation. Any change → generation rejected, no
-exceptions, no LLM involvement in the decision.
+Protected paths — `tb/**`, `constraints/**`, `scripts/**` for the demo project,
+set per project in `project.yaml` — are defended twice:
+
+- **In the tool layer.** `write_file` and `replace_in_file` raise
+  `ProtectedPathError` before touching the disk, so an agent edit to a
+  testbench never happens rather than being detected afterwards.
+- **By hashing.** Every protected file is SHA-256'd before and after each
+  generation. Any change → generation rejected, no exceptions, no LLM
+  involvement in the decision.
 
 The UI shows `Protected evaluation integrity: PASS` on every accepted run.
 
@@ -103,8 +128,12 @@ GEN 04  parallel mux                ACCEPTED
         area ↓5.4%  depth ↓7.6%
 ```
 
-We track **repeats avoided** — how many times memory stopped the agent from
-re-running a known failure. That number is the point.
+The evolve loop tracks **repeats avoided** — `_already_tried()` in
+`chipevolve/services/evolution.py` compares a proposed mutation against prior
+experiments of the same type and blocks it before spending a Codex call, then
+bumps a `repeats_avoided` counter. That number is the point of memory, and it
+is currently only in SQLite: no API field, no UI surface. Surfacing it is
+outstanding work.
 
 See [docs/MEMORY.md](docs/MEMORY.md).
 
@@ -132,8 +161,12 @@ brew install yosys verilator
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
-# 3. Codex must be authenticated — the mutation step depends on it
+# 3. Credentials
+#    Codex drives the CLI evolve loop:
 codex login status
+#    Claude drives the chat sidebar — set this, or chipevolve.anthropicApiKey
+#    in VS Code settings:
+export ANTHROPIC_API_KEY=...
 
 # 4. Establish the baseline, then evolve
 .venv/bin/chipevolve analyze examples/alu
@@ -150,13 +183,24 @@ which one ran.
 ### VS Code extension
 
 ```bash
-# from the repo root
-code .
-# F5 → Extension Development Host → "ChipEvolve: Evolve"
+# install the packaged build
+npm run package
+code --install-extension chipevolve.vsix
+
+# or run from source
+code .          # F5 → Extension Development Host
 ```
 
-The extension spawns the Python backend itself (`.venv` on macOS/Linux, opt-in
-WSL on Windows via the `chipevolve.useWsl` setting).
+Then set two things in VS Code settings:
+
+| Setting | Value |
+|---|---|
+| `chipevolve.anthropicApiKey` | your key, unless it is already in the backend's environment |
+| `chipevolve.projectPath` | absolute path to `examples/alu`, so the agent sees the recorded generations |
+
+Open the ChipEvolve view in the activity bar, run **ChipEvolve: Start Backend**,
+pick a mode and send a task. The extension spawns the Python backend itself
+(`.venv` on macOS/Linux, opt-in WSL on Windows via `chipevolve.useWsl`).
 
 ---
 
@@ -168,8 +212,9 @@ The UI shows live availability. Nothing is faked when unavailable.
 |---|---|
 | Yosys | required — cell count, register count, logic depth |
 | Verilator | required — lint gate + 230-vector testbench |
-| Codex | required — proposes and applies every mutation (`codex exec`) |
-| Engineering memory | working — SQLite; recall, lessons, repeat blocking |
+| Codex | required for the CLI evolve loop — proposes and applies each mutation (`codex exec`) |
+| Claude | required for the chat sidebar — Review, Generate and Optimize modes |
+| Engineering memory | working — SQLite; recall, lessons, repeat blocking (counter not yet surfaced in the UI) |
 | Claude-Mem | adapter slot, not yet wired — local store carries the feature |
 | OpenROAD | not integrated — slack/congestion/power render `N/A` |
 
@@ -179,8 +224,10 @@ The UI shows live availability. Nothing is faked when unavailable.
 
 | Doc | |
 |---|---|
-| [docs/SPLIT.md](docs/SPLIT.md) | Who builds what, checkpoints, freeze time |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the pieces fit |
-| [docs/MEMORY.md](docs/MEMORY.md) | Memory schema + Claude-Mem adapter |
 | [src/types.ts](src/types.ts) | **The frozen contract. Read this first.** |
-| [docs/DEMO.md](docs/DEMO.md) | The 3-minute script |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the pieces fit |
+| [docs/BASELINE.md](docs/BASELINE.md) | The measured baseline, and how to reproduce it |
+| [docs/MEMORY.md](docs/MEMORY.md) | Memory schema + Claude-Mem adapter |
+| [docs/DEMO-EXTENSION-3MIN.md](docs/DEMO-EXTENSION-3MIN.md) | The 3-minute script for the extension |
+| [docs/DEMO.md](docs/DEMO.md) | The 3-minute script for the CLI loop |
+| [docs/archive/](docs/archive/) | Hackathon-era planning docs — historical, paths are stale |

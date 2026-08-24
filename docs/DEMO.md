@@ -33,7 +33,7 @@ Narrate the stages as they stream:
 
 > It's recalling prior experiments on this module... proposing one focused
 > mutation, with a hypothesis... applying the patch in an isolated workspace...
-> Verilator, 42 of 42 passing... Yosys, cell count down 5.4%.
+> Verilator, 230 of 230 passing... Yosys, cell count down 1.0%.
 >
 > Accepted — because the numbers say so, not because the model claims so.
 
@@ -75,10 +75,11 @@ Say this out loud, it's the whole pitch:
 Open the Memory view.
 
 > Every experiment is recorded, failures included. Before proposing anything it
-> recalls related work on the same module. Twice this run it was about to repeat
-> a transformation that already failed, and memory stopped it.
+> recalls related work on the same module. The same bit-width idea came up in
+> three separate generations, and all three were measured rather than assumed —
+> which is how we know it is worth nothing here.
 >
-> Generation 7 is smarter than generation 1. That's the point.
+> Generation 6 starts where generation 5 stopped. That's the point.
 
 **2:35 — Results** (25s)
 
@@ -95,9 +96,9 @@ Verification    PASS  (230/230)
 Protected files UNCHANGED
 ```
 
-> Five generations. One accepted. Four rejected — one because it was correct but
-> changed nothing, one because it broke the RTL, two because memory had already
-> measured them. Every number here came out of Yosys and Verilator. None of it
+> Five generations. One accepted. Four rejected — one because it broke the RTL
+> and Verilator caught it, and three because they were correct and measured no
+> change at all. Every number here came out of Yosys and Verilator. None of it
 > is the model's opinion.
 
 **Do not oversell the 1%.** A judge who knows hardware will respect a real,
@@ -126,7 +127,7 @@ generations regressed. Only measurement catches that.
 
 **"Where did Codex do the work?"**
 It proposes every mutation as a structured plan with a hypothesis, and applies
-the patch. Show `src/agent/codex.ts` and a plan JSON.
+the patch. Show `chipevolve/agent/codex.py` and a plan JSON.
 
 ## If something breaks mid-demo
 

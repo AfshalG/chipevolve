@@ -179,8 +179,10 @@ The UI shows live availability. Nothing is faked when unavailable.
 
 | Doc | |
 |---|---|
-| [docs/SPLIT.md](docs/SPLIT.md) | Who builds what, checkpoints, freeze time |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the pieces fit |
-| [docs/MEMORY.md](docs/MEMORY.md) | Memory schema + Claude-Mem adapter |
 | [src/types.ts](src/types.ts) | **The frozen contract. Read this first.** |
-| [docs/DEMO.md](docs/DEMO.md) | The 3-minute script |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the pieces fit |
+| [docs/BASELINE.md](docs/BASELINE.md) | The measured baseline, and how to reproduce it |
+| [docs/MEMORY.md](docs/MEMORY.md) | Memory schema + Claude-Mem adapter |
+| [docs/DEMO-EXTENSION-3MIN.md](docs/DEMO-EXTENSION-3MIN.md) | The 3-minute script for the extension |
+| [docs/DEMO.md](docs/DEMO.md) | The 3-minute script for the CLI loop |
+| [docs/archive/](docs/archive/) | Hackathon-era planning docs — historical, paths are stale |

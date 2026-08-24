@@ -109,7 +109,7 @@ baseline · parent · best-known
 
 `local.ts` first — JSON at `.chipevolve/memory.json`, ~40 lines, ships
 regardless. `claudeMem.ts` last, behind the same interface. See
-[MEMORY.md](MEMORY.md).
+[MEMORY.md](../MEMORY.md).
 
 ## Emit events constantly
 

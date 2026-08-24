@@ -11,7 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from chipevolve.agents import tools as agent_tools
-from chipevolve.agents.session import DEFAULT_MODEL, SessionManager
+from chipevolve.agents.session import (
+    DEFAULT_MODEL,
+    NO_CREDENTIALS_MESSAGE,
+    SessionManager,
+    credentials_available,
+)
 from chipevolve.domain.models import ProjectSnapshot
 from chipevolve.eda.providers import Toolchain
 from chipevolve.eda.runner import CommandRunner
@@ -104,6 +109,7 @@ async def agent_capabilities() -> dict:
         },
         "protected": config.protected,
         "busy": sessions.busy,
+        "credentials": credentials_available(),
     }
 
 
@@ -115,6 +121,10 @@ async def start_task(payload: dict = Body(...)) -> dict:
     message = (payload.get("message") or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="A task description is required.")
+    # Fail before allocating a generation workspace, so the webview shows the
+    # real reason instead of an empty task that dies on the event stream.
+    if not credentials_available():
+        raise HTTPException(status_code=503, detail=NO_CREDENTIALS_MESSAGE)
     try:
         session = await sessions.start(
             mode=mode,

@@ -33,10 +33,10 @@ class Toolchain:
             "verilator", "--lint-only", "-Wall", "-Wno-UNUSEDSIGNAL",
             "--top-module", project.top, *project.rtl,
         ]
-        return (await self.runner.run("verilator", command, workspace, timeout=10)).execution
+        return (await self.runner.run("verilator", command, workspace, timeout=project.lint_timeout_s)).execution
 
     async def simulate(self, project: ProjectConfig, workspace: Path) -> ToolExecution:
-        result = await self.runner.run("verilator", project.testbench_command, workspace, timeout=20)
+        result = await self.runner.run("verilator", project.testbench_command, workspace, timeout=project.simulation_timeout_s)
         return result.execution
 
     async def synthesize(self, project: ProjectConfig, workspace: Path) -> tuple[Metrics | None, ToolExecution]:
@@ -54,7 +54,7 @@ class Toolchain:
             "stat; ltp -noff"
         )
         command = ["yosys", "-p", script]
-        result = await self.runner.run("yosys", command, workspace, timeout=30)
+        result = await self.runner.run("yosys", command, workspace, timeout=project.synthesis_timeout_s)
         if not result.execution.success:
             return None, result.execution
         stat_path = workspace / "yosys-stat.json"

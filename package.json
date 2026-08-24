@@ -2,7 +2,7 @@
   "name": "chipevolve",
   "displayName": "ChipEvolve",
   "description": "Your chip gets better every generation. Autonomous RTL optimization judged by real EDA tools.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "chipevolve",
   "license": "MIT",
   "engines": {

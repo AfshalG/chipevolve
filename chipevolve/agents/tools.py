@@ -136,11 +136,16 @@ async def _list_files(ctx: ToolContext, _: dict) -> ToolOutcome:
     keep = {".sv", ".v", ".svh", ".vh", ".sdc", ".yaml", ".yml", ".tcl"}
     rows: list[str] = []
     for path in sorted(ctx.workspace.rglob("*")):
-        if not path.is_file() or ".chipevolve" in path.parts or ".git" in path.parts:
+        if not path.is_file() or path.suffix not in keep:
             continue
-        if path.suffix not in keep:
+        # Filter on the path RELATIVE to the workspace. In optimize mode the
+        # workspace is itself `<root>/.chipevolve/generations/gen-NNN`, so
+        # testing the absolute parts matched every file and left the agent
+        # blind to the design it was asked to improve.
+        relative_path = path.relative_to(ctx.workspace)
+        if ".chipevolve" in relative_path.parts or ".git" in relative_path.parts:
             continue
-        relative = path.relative_to(ctx.workspace).as_posix()
+        relative = relative_path.as_posix()
         if ctx.is_protected(relative):
             role = "protected"
         elif relative in ctx.project.rtl:

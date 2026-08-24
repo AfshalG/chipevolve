@@ -176,6 +176,14 @@ class ProjectConfig(BaseModel):
     clock_period_ns: float = 10.0
     objective: Literal["balanced", "performance", "low_power", "compact"] = "balanced"
     max_generations: int = Field(default=5, ge=1, le=50)
+    # Wall-clock ceilings per EDA stage, overridable from project.yaml.
+    # Simulation is the slow one: Verilator's --binary flow compiles C++
+    # before it runs a single vector, and a fresh generation workspace has
+    # no obj_dir to reuse. A budget that is too tight rejects GOOD designs
+    # for compiling slowly, which is indistinguishable from a real failure.
+    lint_timeout_s: float = Field(default=60.0, gt=0)
+    simulation_timeout_s: float = Field(default=300.0, gt=0)
+    synthesis_timeout_s: float = Field(default=180.0, gt=0)
     # Paths Codex is permitted to edit. Enforced in agent/codex.py before any
     # patch is trusted, independently of the CLI sandbox.
     mutable: list[str] = Field(default_factory=lambda: ["rtl/**"])

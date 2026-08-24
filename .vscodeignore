@@ -1,0 +1,16 @@
+.venv/**
+.git/**
+.github/**
+.pytest_cache/**
+**/__pycache__/**
+**/*.pyc
+examples/**/.chipevolve/**
+examples/**/obj_dir/**
+docs/**
+tests/**
+src/**
+scripts/**
+tsconfig.json
+pyproject.toml
+*.vsix
+.gitignore

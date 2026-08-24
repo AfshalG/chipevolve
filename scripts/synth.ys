@@ -1,0 +1,27 @@
+# ChipEvolve synthesis script — Lane B parses this output.
+#
+# Emits:
+#   stat  -> Number of cells, register counts   (cellCount, registerCount)
+#   ltp   -> longest topological path            (logicDepth — a PROXY, not timing)
+#
+# Run from the project dir:  yosys -s ../../scripts/synth.ys
+
+read_verilog -sv rtl/alu.sv
+hierarchy -check -top alu
+
+proc
+opt
+fsm
+opt
+memory
+opt
+
+techmap
+opt
+
+abc -g AND,OR,XOR,NAND,NOR,XNOR
+opt -purge
+
+echo on
+stat
+ltp -noff

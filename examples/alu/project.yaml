@@ -1,0 +1,47 @@
+project:
+  name: demo-alu
+  top: alu
+
+rtl:
+  - rtl/alu.sv
+
+# VERIFIED WORKING 2026-08-23 — Verilator 5.050, Yosys 0.68+post
+lint:
+  # -Wno-UNUSEDSIGNAL is deliberate: the unused upper bits ARE seeded
+  # opportunities 3 and 4. Without it the baseline fails its own gate.
+  command: verilator --lint-only -Wall -Wno-UNUSEDSIGNAL --top-module alu rtl/alu.sv
+
+testbench:
+  command: verilator --binary --timing -Wno-UNUSEDSIGNAL -Wno-fatal --top-module alu_tb tb/alu_tb.sv rtl/alu.sv -o alu_tb
+  binary: obj_dir/alu_tb
+  # Lane B parses this line from stdout:
+  #   TESTS: <passed>/<total> PASSED
+
+synthesis:
+  script: ../../scripts/synth.ys
+
+clock:
+  name: clk
+  period_ns: 10
+
+optimization:
+  objective: balanced
+  max_generations: 8
+
+# Enforced by src/engine/protect.ts — mutable is what Codex may touch.
+mutable:
+  - rtl/**
+
+protected:
+  - tb/**
+  - constraints/**
+  - scripts/**
+
+# Measured baseline — reproduce with the commands above.
+baseline:
+  cellCount: 510
+  registerCount: 9
+  logicDepth: 18
+  areaUm2: null      # no liberty file configured
+  testsPassed: 230
+  testsTotal: 230
